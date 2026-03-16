@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>StaticSort</title>
+    <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <h1>StaticSort</h1>
+        </div>
+        <nav class="tabs">
+            <button class="tab active" data-tab="detect">Detect</button>
+            <button class="tab" data-tab="review">Review</button>
+            <button class="tab" data-tab="extract">Extract</button>
+            <button class="tab" data-tab="settings">Settings</button>
+        </nav>
+    </header>
+
+    <main>
+        <!-- ═══════════ DETECT TAB ═══════════ -->
+        <section id="tab-detect" class="tab-content active">
+            <div class="form-section">
+                <div class="field">
+                    <label for="detect-folder">Folder</label>
+                    <div class="input-group">
+                        <div class="autocomplete-wrapper">
+                            <input type="text" id="detect-folder" placeholder="/home/user/videos" autocomplete="off">
+                            <div class="autocomplete-dropdown" id="detect-folder-dropdown"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="detect-checkpoint-banner" class="banner hidden">
+                    <span id="detect-checkpoint-text"></span>
+                    <button id="detect-resume-btn" class="btn btn-small">Resume</button>
+                    <button id="detect-fresh-btn" class="btn btn-small btn-muted">Fresh Start</button>
+                </div>
+
+                <div class="field">
+                    <label>Sensitivity</label>
+                    <div class="radio-group">
+                        <label><input type="radio" name="sensitivity" value="low"> Low</label>
+                        <label><input type="radio" name="sensitivity" value="medium" checked> Medium</label>
+                        <label><input type="radio" name="sensitivity" value="high"> High</label>
+                    </div>
+                </div>
+
+                <div class="field">
+                    <label for="detect-workers">Workers</label>
+                    <input type="number" id="detect-workers" value="4" min="1" max="16" class="input-small">
+                </div>
+
+                <div class="actions">
+                    <button id="detect-run-btn" class="btn btn-primary">Run Detection</button>
+                    <button id="detect-cancel-btn" class="btn btn-danger hidden">Cancel</button>
+                </div>
+            </div>
+
+            <div id="detect-progress-section" class="progress-section hidden">
+                <div class="progress-header">
+                    <span id="detect-progress-label">Detecting...</span>
+                    <span id="detect-progress-count"></span>
+                </div>
+                <div class="progress-bar-track">
+                    <div class="progress-bar-fill" id="detect-progress-bar"></div>
+                </div>
+            </div>
+
+            <div id="detect-log" class="log-area hidden"></div>
+
+            <div id="detect-summary" class="summary-card hidden">
+                <div class="summary-row"><span class="label">Static</span><span id="sum-static" class="value">0</span></div>
+                <div class="summary-row"><span class="label">Dynamic</span><span id="sum-dynamic" class="value">0</span></div>
+                <div class="summary-row"><span class="label">Review</span><span id="sum-review" class="value">0</span></div>
+                <div class="summary-row"><span class="label">Errors</span><span id="sum-errors" class="value">0</span></div>
+                <div class="summary-row highlight"><span class="label">Est. space saved</span><span id="sum-space" class="value">0 MB</span></div>
+            </div>
+
+            <div id="detect-post-actions" class="actions hidden">
+                <button id="goto-review-btn" class="btn btn-accent hidden">Go to Review</button>
+                <button id="goto-extract-btn" class="btn btn-accent hidden">Go to Extract</button>
+            </div>
+        </section>
+
+        <!-- ═══════════ REVIEW TAB ═══════════ -->
+        <section id="tab-review" class="tab-content">
+            <div class="form-section">
+                <div class="field">
+                    <label for="review-folder">Folder</label>
+                    <div class="input-group">
+                        <div class="autocomplete-wrapper">
+                            <input type="text" id="review-folder" placeholder="/home/user/videos" autocomplete="off">
+                            <div class="autocomplete-dropdown" id="review-folder-dropdown"></div>
+                        </div>
+                        <button id="review-load-btn" class="btn">Load</button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="review-count" class="info-text hidden"></div>
+
+            <div id="review-player-area" class="hidden">
+                <div class="video-card">
+                    <div class="video-wrapper">
+                        <video id="review-video" loop muted playsinline>
+                            Your browser does not support the video tag.
+                        </video>
+                        <div id="review-play-overlay" class="play-overlay">
+                            <span>&#9654;</span>
+                        </div>
+                    </div>
+                    <div class="video-meta">
+                        <span id="review-filename" class="filename"></span>
+                        <div class="meta-details">
+                            <span>Confidence: <strong id="review-confidence"></strong></span>
+                            <span>Motion: <strong id="review-motion"></strong></span>
+                            <span>Duration: <strong id="review-duration"></strong></span>
+                            <span>Size: <strong id="review-size"></strong></span>
+                        </div>
+                    </div>
+                    <div class="decision-buttons">
+                        <button id="review-static-btn" class="btn btn-static">Static (S)</button>
+                        <button id="review-dynamic-btn" class="btn btn-dynamic">Dynamic (D)</button>
+                        <button id="review-skip-btn" class="btn btn-muted">Skip (Space)</button>
+                    </div>
+                </div>
+
+                <div class="review-nav">
+                    <button id="review-prev-btn" class="btn btn-small">&laquo; Prev</button>
+                    <span id="review-position"></span>
+                    <button id="review-next-btn" class="btn btn-small">Next &raquo;</button>
+                </div>
+
+                <div id="review-shortcuts" class="shortcuts-hint">
+                    S = Static &nbsp; D = Dynamic &nbsp; Space = Skip
+                </div>
+            </div>
+
+            <div id="review-done-msg" class="info-text hidden"></div>
+        </section>
+
+        <!-- ═══════════ EXTRACT TAB ═══════════ -->
+        <section id="tab-extract" class="tab-content">
+            <div class="form-section">
+                <div class="field">
+                    <label for="extract-folder">Folder</label>
+                    <div class="input-group">
+                        <div class="autocomplete-wrapper">
+                            <input type="text" id="extract-folder" placeholder="/home/user/videos/static" autocomplete="off">
+                            <div class="autocomplete-dropdown" id="extract-folder-dropdown"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="field">
+                    <label for="extract-output">Output</label>
+                    <input type="text" id="extract-output" placeholder="(default: <folder>/extracted_frames/)">
+                </div>
+
+                <div class="field">
+                    <label>Format</label>
+                    <div class="radio-group">
+                        <label><input type="radio" name="extract-format" value="jpg" checked> JPG</label>
+                        <label><input type="radio" name="extract-format" value="png"> PNG</label>
+                    </div>
+                </div>
+
+                <div class="field" id="extract-quality-field">
+                    <label for="extract-quality">Quality</label>
+                    <div class="slider-group">
+                        <input type="range" id="extract-quality" min="1" max="100" value="95">
+                        <span id="extract-quality-value">95</span>
+                    </div>
+                </div>
+
+                <div class="field">
+                    <label for="extract-workers">Workers</label>
+                    <input type="number" id="extract-workers" value="4" min="1" max="16" class="input-small">
+                </div>
+
+                <div class="field">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="extract-skip-existing">
+                        Skip already extracted
+                    </label>
+                </div>
+
+                <div class="actions">
+                    <button id="extract-run-btn" class="btn btn-primary">Run Extraction</button>
+                    <button id="extract-cancel-btn" class="btn btn-danger hidden">Cancel</button>
+                </div>
+            </div>
+
+            <div id="extract-progress-section" class="progress-section hidden">
+                <div class="progress-header">
+                    <span id="extract-progress-label">Extracting...</span>
+                    <span id="extract-progress-count"></span>
+                </div>
+                <div class="progress-bar-track">
+                    <div class="progress-bar-fill" id="extract-progress-bar"></div>
+                </div>
+            </div>
+
+            <div id="extract-log" class="log-area hidden"></div>
+
+            <div id="extract-summary" class="summary-card hidden">
+                <div class="summary-row"><span class="label">Extracted</span><span id="ext-sum-extracted" class="value">0</span></div>
+                <div class="summary-row"><span class="label">Skipped</span><span id="ext-sum-skipped" class="value">0</span></div>
+                <div class="summary-row"><span class="label">Errors</span><span id="ext-sum-errors" class="value">0</span></div>
+            </div>
+
+            <div id="extract-gallery" class="gallery hidden"></div>
+
+            <!-- Lightbox -->
+            <div id="lightbox" class="lightbox hidden">
+                <div class="lightbox-backdrop"></div>
+                <img id="lightbox-img" src="" alt="Full size">
+            </div>
+        </section>
+
+        <!-- ═══════════ SETTINGS TAB ═══════════ -->
+        <section id="tab-settings" class="tab-content">
+            <div class="form-section">
+                <h2>Defaults</h2>
+                <p class="muted">Used as pre-fills in other tabs.</p>
+
+                <div class="field">
+                    <label>Sensitivity</label>
+                    <div class="radio-group">
+                        <label><input type="radio" name="cfg-sensitivity" value="low"> Low</label>
+                        <label><input type="radio" name="cfg-sensitivity" value="medium" checked> Medium</label>
+                        <label><input type="radio" name="cfg-sensitivity" value="high"> High</label>
+                    </div>
+                </div>
+
+                <div class="field">
+                    <label for="cfg-workers">Workers</label>
+                    <input type="number" id="cfg-workers" value="4" min="1" max="16" class="input-small">
+                </div>
+
+                <div class="field">
+                    <label>Output Format</label>
+                    <div class="radio-group">
+                        <label><input type="radio" name="cfg-format" value="jpg" checked> JPG</label>
+                        <label><input type="radio" name="cfg-format" value="png"> PNG</label>
+                    </div>
+                </div>
+
+                <div class="field">
+                    <label for="cfg-quality">JPG Quality</label>
+                    <div class="slider-group">
+                        <input type="range" id="cfg-quality" min="1" max="100" value="95">
+                        <span id="cfg-quality-value">95</span>
+                    </div>
+                </div>
+
+                <div class="actions">
+                    <button id="settings-save-btn" class="btn btn-primary">Save Defaults</button>
+                    <span id="settings-saved-msg" class="saved-msg hidden">Saved</span>
+                </div>
+
+                <hr>
+                <div class="about">
+                    <p><strong>StaticSort</strong> v1.0</p>
+                    <p class="muted">Video classifier &amp; frame extractor</p>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <div id="toast-container"></div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

@@ -27,13 +27,9 @@ Examples:
 """
 
 import argparse
-import json
-import os
 import shutil
 import signal
-import subprocess
 import sys
-import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -44,10 +40,7 @@ import atexit
 try:
     import termios
 except ImportError:
-    termios = None  # Not available on Windows/macOS without pty
-
-import cv2
-import numpy as np
+    termios = None
 
 try:
     from tqdm import tqdm
@@ -55,68 +48,32 @@ try:
 except ImportError:
     HAS_TQDM = False
 
+from core import (
+    ENV, VIDEO_EXTENSIONS, extract_one_frame,
+)
+
 # ─────────────────────────────────────────────
 # TERMINAL STATE PROTECTION
 # ─────────────────────────────────────────────
-# tqdm and subprocess can modify terminal attributes (e.g. disable echo).
-# If the script exits uncleanly, those changes persist and the terminal
-# stops echoing typed characters.  We save the original state at startup
-# and guarantee it is restored on *any* exit path.
 
 _saved_term_attrs = None
 
 def _save_terminal_state():
-    """Save current terminal attributes so we can restore them later."""
     global _saved_term_attrs
     if termios is None:
         return
     try:
         _saved_term_attrs = termios.tcgetattr(sys.stdin.fileno())
     except (termios.error, ValueError, OSError):
-        # Not a real terminal (piped stdin, CI, etc.) — nothing to save.
         pass
 
 def _restore_terminal_state():
-    """Restore terminal attributes saved at startup."""
     if _saved_term_attrs is not None and termios is not None:
         try:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN,
                               _saved_term_attrs)
         except (termios.error, ValueError, OSError):
             pass
-
-# Terminal state save/restore and signal handler registration
-# are deferred to main() so importing this module for tests
-# does not have side effects.
-
-# ─────────────────────────────────────────────
-# ENVIRONMENT DETECTION
-# ─────────────────────────────────────────────
-
-def detect_environment() -> dict:
-    is_termux = (
-        os.environ.get("TERMUX_VERSION") is not None
-        or Path("/data/data/com.termux").exists()
-        or "com.termux" in os.environ.get("PREFIX", "")
-    )
-    cpu_count = os.cpu_count() or 2
-    return {
-        "is_termux":      is_termux,
-        "max_workers":    2 if is_termux else min(cpu_count, 8),
-        "ffmpeg_timeout": 120 if is_termux else 90,
-        "probe_timeout":  20  if is_termux else 10,
-    }
-
-ENV = detect_environment()
-
-# ─────────────────────────────────────────────
-# CONSTANTS
-# ─────────────────────────────────────────────
-
-VIDEO_EXTENSIONS = {
-    ".mp4", ".mkv", ".avi", ".mov", ".webm",
-    ".flv", ".m4v", ".3gp", ".ts", ".wmv",
-}
 
 # ─────────────────────────────────────────────
 # INTERRUPT HANDLING
@@ -142,8 +99,6 @@ def _handle_sigint(sig, frame):
             _hard_stop_event.set()
             _restore_terminal_state()
             sys.exit(1)
-
-# signal.signal(signal.SIGINT, ...) is registered in main()
 
 # ─────────────────────────────────────────────
 # PROGRESS BAR
@@ -174,187 +129,6 @@ def make_bar(total, desc):
     if HAS_TQDM:
         return tqdm(total=total, desc=desc, unit="video")
     return FallbackBar(total=total, desc=desc)
-
-# ─────────────────────────────────────────────
-# FFPROBE
-# ─────────────────────────────────────────────
-
-def get_duration(path: Path) -> float:
-    """Return the duration of a video file in seconds via ffprobe.
-
-    This is a lighter probe than ``detect.py``'s ``probe_video()`` which
-    fetches full stream metadata (codec, resolution, audio).  Frame
-    extraction only needs the duration, so we query ``-show_format`` alone
-    to keep it fast.
-    """
-    cmd = [
-        "ffprobe", "-v", "quiet", "-print_format", "json",
-        "-show_format", str(path)
-    ]
-    try:
-        r = subprocess.run(cmd, capture_output=True, text=True,
-                           timeout=ENV["probe_timeout"])
-        return float(json.loads(r.stdout).get("format", {}).get("duration", 0))
-    except Exception:
-        return 60.0
-
-# ─────────────────────────────────────────────
-# FRAME EXTRACTION  (single ffmpeg call, full resolution)
-# ─────────────────────────────────────────────
-
-def extract_full_res_frames(path: Path, duration: float) -> list[np.ndarray]:
-    """
-    Extract frames at FULL original resolution in a single ffmpeg call.
-    More frames for short videos, proportionally fewer for long ones.
-    PNG used internally to avoid double-compression artefacts.
-    """
-    if duration <= 0:
-        duration = 60.0
-
-    # Cap total frames to limit peak RAM usage.  At 1080p each decoded
-    # frame is ~6 MB, so 20 frames ≈ 120 MB vs 40 frames ≈ 240 MB.
-    # On Termux (low RAM) we cap even lower to avoid OOM kills.
-    max_frames = 12 if ENV["is_termux"] else 20
-    n       = min(max_frames, max(8, int(duration * 1.5)))
-    margin  = max(0.5, duration * 0.05)
-    t_start = margin
-    t_end   = max(t_start + 1.0, duration - margin)
-    fps     = n / max(t_end - t_start, 1.0)
-
-    fps = max(fps, 0.5)  # min 0.5fps floor so we always get frames
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        out = os.path.join(tmpdir, "f%04d.png")
-        # -ss and -to placed AFTER -i for accurate frame seeking.
-        # Pre-seek (-ss before -i) uses fast keyframe seeking which can
-        # overshoot on short clips and produce zero frames.
-        cmd = [
-            "ffmpeg",
-            "-i",  str(path),
-            "-ss", f"{t_start:.3f}",
-            "-to", f"{t_end:.3f}",
-            "-vf", f"fps={fps:.5f}",
-            "-compression_level", "0",
-            "-loglevel", "error",
-            "-y", out,
-        ]
-        try:
-            proc = subprocess.run(cmd, capture_output=True,
-                                    timeout=ENV["ffmpeg_timeout"])
-            if proc.returncode != 0:
-                return []
-        except Exception:
-            return []
-
-        frames = []
-        for fname in sorted(os.listdir(tmpdir)):
-            if fname.endswith(".png"):
-                frame = cv2.imread(os.path.join(tmpdir, fname))
-                if frame is not None:
-                    frames.append(frame)
-
-        # Fallback: if still no frames, decode entire file from t=0
-        if len(frames) < 2:
-            for f in os.listdir(tmpdir):
-                os.remove(os.path.join(tmpdir, f))
-            cmd_fallback = [
-                "ffmpeg", "-i", str(path),
-                "-vf", f"fps={fps:.5f}",
-                "-compression_level", "0",
-                "-loglevel", "error",
-                "-y", out,
-            ]
-            try:
-                proc = subprocess.run(cmd_fallback, capture_output=True,
-                               timeout=ENV["ffmpeg_timeout"])
-                if proc.returncode != 0:
-                    return frames
-            except Exception:
-                return frames
-            for fname in sorted(os.listdir(tmpdir)):
-                if fname.endswith(".png"):
-                    frame = cv2.imread(os.path.join(tmpdir, fname))
-                    if frame is not None:
-                        frames.append(frame)
-
-    return frames
-
-# ─────────────────────────────────────────────
-# BEST FRAME SELECTION
-# ─────────────────────────────────────────────
-
-def pick_best_frame(frames: list[np.ndarray]) -> int:
-    """
-    Return index of the calmest (lowest motion to neighbours) +
-    sharpest (highest Laplacian variance) frame.
-    First and last frames are excluded (fade-in / fade-out).
-    """
-    if len(frames) <= 2:
-        # Not enough frames for motion analysis; pick first (or only) frame.
-        # For 2 frames we could compare sharpness, but the margin is tiny.
-        return 0
-
-    n      = len(frames)
-    motion = np.zeros(n, dtype=np.float64)
-    sharp  = np.zeros(n, dtype=np.float64)
-
-    # Pre-compute grayscale once to avoid redundant conversions
-    grays = [cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) for f in frames]
-
-    for i in range(n):
-        sharp[i] = cv2.Laplacian(grays[i].astype(np.float64), cv2.CV_64F).var()
-
-    for i in range(1, n - 1):
-        gp = grays[i-1].astype(np.float64)
-        gc = grays[i].astype(np.float64)
-        gn = grays[i+1].astype(np.float64)
-        motion[i] = (np.mean(np.abs(gc - gp)) + np.mean(np.abs(gc - gn))) / 2.0
-
-    def norm(a: np.ndarray) -> np.ndarray:
-        mn, mx = a.min(), a.max()
-        return np.zeros_like(a) if mx == mn else (a - mn) / (mx - mn)
-
-    score       = (1.0 - norm(motion)) * 0.6 + norm(sharp) * 0.4
-    score[0]    = -1.0   # exclude first frame
-    score[-1]   = -1.0   # exclude last frame
-    return int(np.argmax(score))
-
-# ─────────────────────────────────────────────
-# PER-VIDEO EXTRACTION
-# ─────────────────────────────────────────────
-
-def extract_one(video_path: Path, output_dir: Path,
-                fmt: str, quality: int) -> dict:
-    """Extract best frame from one video. Returns status dict.
-
-    Callers are expected to pre-filter videos (e.g. via --skip-existing)
-    before submitting them to this function.
-    """
-    out_path = output_dir / (video_path.stem + f".{fmt}")
-
-    duration = get_duration(video_path)
-    frames   = extract_full_res_frames(video_path, duration)
-
-    if not frames:
-        return {"file": video_path.name, "status": "error: no frames extracted", "output": ""}
-
-    best  = pick_best_frame(frames)
-    frame = frames[best]
-
-    try:
-        if fmt == "jpg":
-            ok = cv2.imwrite(str(out_path), frame,
-                             [cv2.IMWRITE_JPEG_QUALITY, quality])
-        else:
-            ok = cv2.imwrite(str(out_path), frame,
-                             [cv2.IMWRITE_PNG_COMPRESSION, 0])
-        if not ok:
-            return {"file": video_path.name, "status": "error: cv2.imwrite failed",
-                    "output": ""}
-    except Exception as e:
-        return {"file": video_path.name, "status": f"error: {e}", "output": ""}
-
-    return {"file": video_path.name, "status": "ok", "output": str(out_path)}
 
 # ─────────────────────────────────────────────
 # MAIN
@@ -415,7 +189,6 @@ def main():
     script_start_time = time.time()
     args = parse_args()
 
-    # Register terminal state protection and signal handler
     _save_terminal_state()
     atexit.register(_restore_terminal_state)
     signal.signal(signal.SIGINT, _handle_sigint)
@@ -441,7 +214,6 @@ def main():
     if args.workers is not None and args.workers > workers:
         print(f"⚠️  --workers {args.workers} exceeds platform cap; using {workers}")
 
-    # Collect videos (skip the output dir itself if nested)
     video_files = sorted([
         p for p in folder.iterdir()
         if p.is_file() and p.suffix.lower() in VIDEO_EXTENSIONS
@@ -451,7 +223,6 @@ def main():
         print("No video files found.")
         sys.exit(0)
 
-    # Count how many will be skipped up front
     if args.skip_existing and not args.fresh:
         to_process = [
             vp for vp in video_files
@@ -480,8 +251,9 @@ def main():
         for vp in to_process:
             if _interrupt_event.is_set():
                 break
+            out_path = output_dir / (vp.stem + f".{args.format}")
             futures[executor.submit(
-                extract_one, vp, output_dir,
+                extract_one_frame, vp, out_path,
                 args.format, args.quality
             )] = vp
 
@@ -507,7 +279,6 @@ def main():
                     interrupted = True
                     break
 
-    # ── Summary ──
     ok      = [r for r in results if r["status"] == "ok"]
     skipped = [r for r in results if r["status"] == "skipped"]
     errors  = [r for r in results if r["status"].startswith("error")]

@@ -1,3 +1,7 @@
 opencv-python-headless>=4.5
 numpy>=1.21
 tqdm>=4.60
+fastapi>=0.100
+uvicorn>=0.20
+python-multipart>=0.0.5
+jinja2>=3.1
