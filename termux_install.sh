@@ -1,30 +1,25 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# termux_install.sh — Install StaticSort dependencies on Termux
+# termux_install.sh — Install StaticVideoSorter dependencies on Termux
 
 set -e
 
 echo "================================"
-echo "  StaticSort — Termux Installer"
+echo "  StaticVideoSorter — Termux Installer"
 echo "================================"
 echo ""
 
 # Update package repos
-echo "[1/4] Updating package repositories..."
+echo "[1/3] Updating package repositories..."
 pkg update -y && pkg upgrade -y
 
 # Install system packages
 echo ""
-echo "[2/4] Installing system packages..."
+echo "[2/3] Installing system packages..."
 pkg install -y python ffmpeg
-
-# Upgrade pip
-echo ""
-echo "[3/4] Upgrading pip..."
-pip install --upgrade pip
 
 # Install Python dependencies
 echo ""
-echo "[4/4] Installing Python dependencies..."
+echo "[3/3] Installing Python dependencies..."
 pip install opencv-python-headless numpy tqdm fastapi uvicorn python-multipart jinja2
 
 echo ""

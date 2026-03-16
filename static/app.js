@@ -1,4 +1,4 @@
-/* ═══════════ StaticSort Frontend ═══════════ */
+/* ═══════════ StaticVideoSorter Frontend ═══════════ */
 
 (function () {
     "use strict";

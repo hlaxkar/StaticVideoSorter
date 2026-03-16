@@ -1,4 +1,4 @@
-# StaticSort
+# StaticVideoSorter
 
 Detect static-image videos (music visualizers, lyric videos, Instagram reposts) in a folder,
 sort them into categorized subfolders, and extract the single best frame from each.

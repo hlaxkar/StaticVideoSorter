@@ -1,8 +1,8 @@
-# StaticSort GUI — Implementation Plan
+# StaticVideoSorter GUI — Implementation Plan
 
 ## Overview
 
-Build a local web UI for StaticSort that works identically on:
+Build a local web UI for StaticVideoSorter that works identically on:
 - **PC** (Linux / Windows / Mac): `python app.py` → open `localhost:7860` in browser
 - **Android Termux**: `python app.py` → open `localhost:7860` in phone browser
 
@@ -18,7 +18,7 @@ call, or wrap the CLI scripts.
 ## Repository Structure
 
 ```
-staticsort/
+StaticVideoSorter/
 ├── detect.py               ← existing, unchanged
 ├── extract.py              ← existing, unchanged
 ├── app.py                  ← NEW: FastAPI server
@@ -303,7 +303,7 @@ UI labels.
 
 ```
 ┌─────────────────────────────────────────────┐
-│  StaticSort          [Detect][Review][Extract][Settings]  │
+│  StaticVideoSorter          [Detect][Review][Extract][Settings]  │
 ├─────────────────────────────────────────────┤
 │                                             │
 │              [active tab content]           │
@@ -465,8 +465,8 @@ The header with tab buttons is always visible.
 │                                             │
 │  ─────────────────────────────────────────  │
 │  About                                      │
-│  StaticSort v1.0                            │
-│  GitHub: github.com/hlaxkar/StaticSort      │
+│  StaticVideoSorter v1.0                            │
+│  GitHub: github.com/hlaxkar/StaticVideoSorter      │
 │                                             │
 └─────────────────────────────────────────────┘
 ```

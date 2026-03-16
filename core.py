@@ -1,5 +1,5 @@
 """
-core.py — Shared detection and extraction logic for StaticSort.
+core.py — Shared detection and extraction logic for StaticVideoSorter.
 
 Both the CLI scripts (detect.py, extract.py) and the web GUI (app.py)
 import from this module.  No CLI-specific code lives here — only the

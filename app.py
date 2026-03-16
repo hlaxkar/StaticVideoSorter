@@ -1,5 +1,5 @@
 """
-app.py — FastAPI web server for StaticSort GUI.
+app.py — FastAPI web server for StaticVideoSorter GUI.
 
 Run:
     python app.py
@@ -305,7 +305,7 @@ def validate_path(path_str: str) -> Path:
 # FASTAPI APP
 # ─────────────────────────────────────────────
 
-app = FastAPI(title="StaticSort")
+app = FastAPI(title="StaticVideoSorter")
 app.mount("/static", StaticFiles(directory=str(APP_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(APP_DIR / "templates"))
 
@@ -640,7 +640,7 @@ async def set_config(request: Request):
 if __name__ == "__main__":
     import uvicorn
     port = 7860
-    print(f"\n  StaticSort GUI")
+    print(f"\n  StaticVideoSorter GUI")
     print(f"  {'─' * 30}")
     print(f"  Open in browser: http://localhost:{port}")
     if IS_TERMUX:
