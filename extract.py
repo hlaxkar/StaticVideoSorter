@@ -34,10 +34,13 @@ import signal
 import subprocess
 import sys
 import tempfile
+import termios
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+import atexit
 
 import cv2
 import numpy as np
@@ -47,6 +50,37 @@ try:
     HAS_TQDM = True
 except ImportError:
     HAS_TQDM = False
+
+# ─────────────────────────────────────────────
+# TERMINAL STATE PROTECTION
+# ─────────────────────────────────────────────
+# tqdm and subprocess can modify terminal attributes (e.g. disable echo).
+# If the script exits uncleanly, those changes persist and the terminal
+# stops echoing typed characters.  We save the original state at startup
+# and guarantee it is restored on *any* exit path.
+
+_saved_term_attrs = None
+
+def _save_terminal_state():
+    """Save current terminal attributes so we can restore them later."""
+    global _saved_term_attrs
+    try:
+        _saved_term_attrs = termios.tcgetattr(sys.stdin.fileno())
+    except (termios.error, ValueError, OSError):
+        # Not a real terminal (piped stdin, CI, etc.) — nothing to save.
+        pass
+
+def _restore_terminal_state():
+    """Restore terminal attributes saved at startup."""
+    if _saved_term_attrs is not None:
+        try:
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN,
+                              _saved_term_attrs)
+        except (termios.error, ValueError, OSError):
+            pass
+
+_save_terminal_state()
+atexit.register(_restore_terminal_state)
 
 # ─────────────────────────────────────────────
 # ENVIRONMENT DETECTION
@@ -99,6 +133,7 @@ def _handle_sigint(sig, frame):
         else:
             print("\n🛑 Force quit.\n")
             _hard_stop_event.set()
+            _restore_terminal_state()
             sys.exit(1)
 
 signal.signal(signal.SIGINT, _handle_sigint)
@@ -169,21 +204,26 @@ def extract_full_res_frames(path: Path, duration: float) -> list[np.ndarray]:
     t_end   = max(t_start + 1.0, duration - margin)
     fps     = n / max(t_end - t_start, 1.0)
 
+    fps = max(fps, 0.5)  # min 0.5fps floor so we always get frames
+
     with tempfile.TemporaryDirectory() as tmpdir:
         out = os.path.join(tmpdir, "f%04d.png")
+        # -ss and -to placed AFTER -i for accurate frame seeking.
+        # Pre-seek (-ss before -i) uses fast keyframe seeking which can
+        # overshoot on short clips and produce zero frames.
         cmd = [
             "ffmpeg",
+            "-i",  str(path),
             "-ss", f"{t_start:.3f}",
             "-to", f"{t_end:.3f}",
-            "-i",  str(path),
             "-vf", f"fps={fps:.5f}",
-            "-compression_level", "0",   # fastest PNG write, no quality loss
+            "-compression_level", "0",
             "-loglevel", "error",
             "-y", out,
         ]
         try:
-            subprocess.run(cmd, capture_output=True,
-                           timeout=ENV["ffmpeg_timeout"])
+            result = subprocess.run(cmd, capture_output=True,
+                                    timeout=ENV["ffmpeg_timeout"])
         except Exception:
             return []
 
@@ -193,6 +233,28 @@ def extract_full_res_frames(path: Path, duration: float) -> list[np.ndarray]:
                 frame = cv2.imread(os.path.join(tmpdir, fname))
                 if frame is not None:
                     frames.append(frame)
+
+        # Fallback: if still no frames, decode entire file from t=0
+        if len(frames) < 2:
+            for f in os.listdir(tmpdir):
+                os.remove(os.path.join(tmpdir, f))
+            cmd_fallback = [
+                "ffmpeg", "-i", str(path),
+                "-vf", f"fps={fps:.5f}",
+                "-compression_level", "0",
+                "-loglevel", "error",
+                "-y", out,
+            ]
+            try:
+                subprocess.run(cmd_fallback, capture_output=True,
+                               timeout=ENV["ffmpeg_timeout"])
+            except Exception:
+                return frames
+            for fname in sorted(os.listdir(tmpdir)):
+                if fname.endswith(".png"):
+                    frame = cv2.imread(os.path.join(tmpdir, fname))
+                    if frame is not None:
+                        frames.append(frame)
 
     return frames
 

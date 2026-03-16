@@ -35,11 +35,14 @@ import signal
 import subprocess
 import sys
 import tempfile
+import termios
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+
+import atexit
 
 import cv2
 import numpy as np
@@ -49,6 +52,37 @@ try:
     HAS_TQDM = True
 except ImportError:
     HAS_TQDM = False
+
+# ─────────────────────────────────────────────
+# TERMINAL STATE PROTECTION
+# ─────────────────────────────────────────────
+# tqdm and subprocess can modify terminal attributes (e.g. disable echo).
+# If the script exits uncleanly, those changes persist and the terminal
+# stops echoing typed characters.  We save the original state at startup
+# and guarantee it is restored on *any* exit path.
+
+_saved_term_attrs = None
+
+def _save_terminal_state():
+    """Save current terminal attributes so we can restore them later."""
+    global _saved_term_attrs
+    try:
+        _saved_term_attrs = termios.tcgetattr(sys.stdin.fileno())
+    except (termios.error, ValueError, OSError):
+        # Not a real terminal (piped stdin, CI, etc.) — nothing to save.
+        pass
+
+def _restore_terminal_state():
+    """Restore terminal attributes saved at startup."""
+    if _saved_term_attrs is not None:
+        try:
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN,
+                              _saved_term_attrs)
+        except (termios.error, ValueError, OSError):
+            pass
+
+_save_terminal_state()
+atexit.register(_restore_terminal_state)
 
 # ─────────────────────────────────────────────
 # ENVIRONMENT DETECTION
@@ -100,6 +134,12 @@ SENSITIVITY_PRESETS = {
 }
 
 def sample_count(duration: float) -> int:
+    """Return how many frames to sample.  For very short clips (<10 s) we
+    use fewer frames so they are spread out in time and produce meaningful
+    inter-frame differences instead of near-identical consecutive frames."""
+    if duration < 3:   return 2      # absolute minimum for motion calc
+    if duration < 5:   return 3
+    if duration < 10:  return 4
     if duration < 30:  return 5
     if duration < 60:  return 8
     return 16
@@ -238,6 +278,7 @@ def _handle_sigint(sig, frame):
         else:
             print("\n🛑 Force quit.\n")
             _hard_stop_event.set()
+            _restore_terminal_state()
             sys.exit(1)
 
 signal.signal(signal.SIGINT, _handle_sigint)
@@ -307,42 +348,74 @@ def probe_video(path: Path) -> dict | None:
 # ─────────────────────────────────────────────
 
 def extract_analysis_frames(path: Path, duration: float,
-                             n: int) -> list[np.ndarray]:
+                             n: int, debug: bool = False) -> list[np.ndarray]:
     """
     Extract n small frames from video in ONE ffmpeg call.
     Frames are downscaled to ANALYSIS_WIDTH for fast motion math.
+
+    Falls back to decoding from t=0 if the timestamp-seek approach
+    yields no frames (handles zero/unreliable duration metadata).
     """
-    margin     = max(0.5, duration * 0.05)
-    t_start    = margin
-    t_end      = max(t_start + 1.0, duration - margin)
-    seg_dur    = t_end - t_start
-    target_fps = n / seg_dur
-    vf         = f"fps={target_fps:.5f},scale={ANALYSIS_WIDTH}:-2"
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        out = os.path.join(tmpdir, "f%04d.jpg")
-        cmd = [
-            "ffmpeg",
-            "-ss", f"{t_start:.3f}",
-            "-to", f"{t_end:.3f}",
-            "-i",  str(path),
-            "-vf", vf,
-            "-q:v", "5",          # lower quality fine for analysis
-            "-loglevel", "error",
-            "-y", out,
-        ]
+    def _run_ffmpeg(t_start, t_end, out_pattern, tmpdir):
+        seg_dur    = (t_end - t_start) if (t_start is not None and t_end is not None) else 30.0
+        target_fps = max(n / max(seg_dur, 1.0), 0.5)  # min 0.5fps so we always get frames
+        vf         = f"fps={target_fps:.5f},scale={ANALYSIS_WIDTH}:-2"
+        # Place -ss and -to AFTER -i for accurate seeking (not keyframe-only).
+        # Fast pre-seek (-ss before -i) can overshoot on short clips and produce
+        # zero frames when the nearest keyframe is beyond -to.
+        cmd = ["ffmpeg", "-i", str(path)]
+        if t_start is not None:
+            cmd += ["-ss", f"{t_start:.3f}"]
+        if t_end is not None:
+            cmd += ["-to", f"{t_end:.3f}"]
+        cmd += ["-vf", vf, "-q:v", "5",
+                "-loglevel", "error", "-y", out_pattern]
         try:
-            subprocess.run(cmd, capture_output=True,
-                           timeout=ENV["ffmpeg_timeout"])
-        except Exception:
+            result = subprocess.run(cmd, capture_output=True,
+                                    timeout=ENV["ffmpeg_timeout"])
+            if debug and result.stderr:
+                stderr_str = result.stderr.decode(errors="replace").strip()
+                if stderr_str:
+                    print(f"\n  [debug] {path.name}: {stderr_str}")
+        except subprocess.TimeoutExpired:
+            if debug:
+                print(f"\n  [debug] {path.name}: ffmpeg timed out")
             return []
-
-        frames = []
+        except Exception as e:
+            if debug:
+                print(f"\n  [debug] {path.name}: ffmpeg error: {e}")
+            return []
+        found = []
         for fname in sorted(os.listdir(tmpdir)):
             if fname.endswith(".jpg"):
                 frame = cv2.imread(os.path.join(tmpdir, fname))
                 if frame is not None:
-                    frames.append(frame)
+                    found.append(frame)
+        return found
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = os.path.join(tmpdir, "f%04d.jpg")
+        # For short videos (<10 s) use minimal margins so we actually
+        # cover a meaningful portion of the timeline.  The old fixed
+        # 0.5 s margin + 5-sample default would pack frames so tightly
+        # that even dynamic clips appeared static.
+        if duration < 5:
+            margin = 0.1                 # near the edges is fine
+        elif duration < 10:
+            margin = min(0.3, duration * 0.03)
+        else:
+            margin = max(0.5, duration * 0.05)
+        t_start = margin
+        t_end   = max(t_start + 0.5, duration - margin)
+        frames  = _run_ffmpeg(t_start, t_end, out, tmpdir)
+        # Fallback: decode from t=0 with no seek (broken duration metadata)
+        if len(frames) < 2:
+            if debug:
+                print(f"\n  [debug] {path.name}: seek got {len(frames)} frames "
+                      f"— retrying from t=0")
+            for f in os.listdir(tmpdir):
+                os.remove(os.path.join(tmpdir, f))
+            frames = _run_ffmpeg(None, None, out, tmpdir)
 
     return frames
 
@@ -391,7 +464,12 @@ def layer2_spatial_zones(frames: list[np.ndarray]) -> float:
 
 
 def layer3_heuristics(info: dict) -> float:
-    """Heuristic score [0,1] based on video metadata."""
+    """Heuristic score [0,1] based on video metadata.
+
+    Short videos (<10 s) receive a penalty because the detection layers
+    have less temporal data to work with — motion scores are noisier,
+    so we lean toward "not static" to avoid false positives.
+    """
     score, votes = 0.0, 0
 
     if info["width"] > 0 and info["height"] > 0:
@@ -404,8 +482,17 @@ def layer3_heuristics(info: dict) -> float:
     if info["has_audio"]:
         score += 0.7;  votes += 1
 
-    if 0 < info["duration"] < 600:
-        score += 0.4;  votes += 1
+    dur = info["duration"]
+    if dur > 0:
+        # Penalise very short clips: we have less confidence in our
+        # motion analysis, so the heuristic should push toward "dynamic"
+        # rather than "static".
+        if dur < 5:
+            score += 0.05;  votes += 1      # near-zero boost
+        elif dur < 10:
+            score += 0.15;  votes += 1      # modest boost
+        elif dur < 600:
+            score += 0.4;   votes += 1      # original normal boost
 
     if info["codec"] in ("h264", "avc", "hevc", "h265"):
         score += 0.3;  votes += 1
@@ -414,7 +501,8 @@ def layer3_heuristics(info: dict) -> float:
 
 
 def compute_confidence(global_motion: float, zone_ratio: float,
-                       heuristic: float, T: dict) -> float:
+                       heuristic: float, T: dict,
+                       duration: float = 0.0) -> float:
     motion_conf = 1.0 - float(np.clip(
         (global_motion - T["global_motion_static"]) /
         max(T["global_motion_review"] - T["global_motion_static"], 1e-6),
@@ -424,16 +512,25 @@ def compute_confidence(global_motion: float, zone_ratio: float,
         zone_ratio / max(T["active_zone_ratio"], 1e-6),
         0.0, 1.0
     ))
-    return float(np.clip(
+    raw = float(np.clip(
         motion_conf * 0.50 + zone_conf * 0.30 + heuristic * 0.20,
         0.0, 1.0
     ))
+    # ── Short-video penalty ──
+    # With fewer frames the motion/zone measurements are unreliable.
+    # Apply a multiplicative penalty so a borderline video is pushed
+    # toward "dynamic/review" instead of being called "static".
+    if 0 < duration < 5:
+        raw *= 0.75        # 25 % confidence reduction
+    elif 0 < duration < 10:
+        raw *= 0.88        # 12 % confidence reduction
+    return raw
 
 # ─────────────────────────────────────────────
 # PER-VIDEO DETECTION
 # ─────────────────────────────────────────────
 
-def detect_video(video_path: Path, thresholds: dict) -> dict:
+def detect_video(video_path: Path, thresholds: dict, debug: bool = False) -> dict:
     """Run full detection pipeline. Returns log row dict. Never raises."""
     row = {f: "" for f in LOG_FIELDS}
     row["filename"] = video_path.name
@@ -455,7 +552,7 @@ def detect_video(video_path: Path, thresholds: dict) -> dict:
 
     # ── Extract analysis frames (single ffmpeg call) ──
     n      = sample_count(duration)
-    frames = extract_analysis_frames(video_path, duration, n)
+    frames = extract_analysis_frames(video_path, duration, n, debug=debug)
 
     if len(frames) < 2:
         row["decision"] = "error_frame_extraction_failed"
@@ -468,11 +565,14 @@ def detect_video(video_path: Path, thresholds: dict) -> dict:
     row["global_motion_score"] = f"{global_motion:.3f}"
 
     # ── Early exit: obviously static (skip layers 2 & 3) ──
-    if global_motion < T["global_motion_static"] * 0.5:
+    # Disabled for short videos (<10 s) because too-few / tightly-spaced
+    # frames can produce artificially low motion scores.
+    if duration >= 10 and global_motion < T["global_motion_static"] * 0.5:
         h3 = layer3_heuristics(info)
         row["active_zone_ratio"] = "0.000"
         row["heuristic_score"]   = f"{h3:.3f}"
-        conf                     = compute_confidence(global_motion, 0.0, h3, T)
+        conf                     = compute_confidence(global_motion, 0.0, h3, T,
+                                                      duration=duration)
         row["final_confidence"]  = f"{conf:.3f}"
         row["decision"]          = "static"
         return row
@@ -494,7 +594,8 @@ def detect_video(video_path: Path, thresholds: dict) -> dict:
     row["heuristic_score"] = f"{heuristic:.3f}"
 
     # ── Confidence + decision ──
-    conf                    = compute_confidence(global_motion, zone_ratio, heuristic, T)
+    conf                    = compute_confidence(global_motion, zone_ratio, heuristic, T,
+                                                 duration=duration)
     row["final_confidence"] = f"{conf:.3f}"
 
     if conf >= T["confidence_static"]:
@@ -614,6 +715,8 @@ def parse_args():
                    help="Ignore checkpoint, re-detect everything")
     p.add_argument("--report",       action="store_true",
                    help="Print per-video breakdown after run")
+    p.add_argument("--debug",        action="store_true",
+                   help="Print ffmpeg stderr for any video that fails frame extraction")
     return p.parse_args()
 
 
@@ -718,7 +821,7 @@ def main():
             for vp in to_detect:
                 if _interrupt_event.is_set():
                     break
-                futures[executor.submit(detect_video, vp, thresholds)] = vp
+                futures[executor.submit(detect_video, vp, thresholds, args.debug)] = vp
 
             with make_bar(len(futures), "Detecting") as pbar:
                 for future in as_completed(futures):
