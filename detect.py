@@ -35,7 +35,10 @@ import signal
 import subprocess
 import sys
 import tempfile
-import termios
+try:
+    import termios
+except ImportError:
+    termios = None  # Not available on Windows/macOS without pty
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -66,6 +69,8 @@ _saved_term_attrs = None
 def _save_terminal_state():
     """Save current terminal attributes so we can restore them later."""
     global _saved_term_attrs
+    if termios is None:
+        return
     try:
         _saved_term_attrs = termios.tcgetattr(sys.stdin.fileno())
     except (termios.error, ValueError, OSError):
@@ -74,15 +79,16 @@ def _save_terminal_state():
 
 def _restore_terminal_state():
     """Restore terminal attributes saved at startup."""
-    if _saved_term_attrs is not None:
+    if _saved_term_attrs is not None and termios is not None:
         try:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN,
                               _saved_term_attrs)
         except (termios.error, ValueError, OSError):
             pass
 
-_save_terminal_state()
-atexit.register(_restore_terminal_state)
+# Terminal state save/restore and signal handler registration
+# are deferred to main() so importing this module for tests
+# does not have side effects.
 
 # ─────────────────────────────────────────────
 # ENVIRONMENT DETECTION
@@ -203,9 +209,19 @@ class Checkpoint:
             self._flush()
             self._queue.task_done()
 
-    def _flush(self):
+    def _flush(self, pretty: bool = False):
+        """Write checkpoint to disk atomically via tmp-rename.
+
+        Use compact JSON by default (faster for frequent mid-run writes);
+        pretty-print only on the final flush so the file is human-readable
+        when the run is complete.
+        """
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._data, indent=2), encoding="utf-8")
+        if pretty:
+            payload = json.dumps(self._data, indent=2)
+        else:
+            payload = json.dumps(self._data, separators=(',', ':'))
+        tmp.write_text(payload, encoding="utf-8")
         tmp.replace(self.path)
 
     def save_meta(self, **kwargs):
@@ -229,7 +245,8 @@ class Checkpoint:
                         self._data["completed"][key] = value
                 except queue.Empty:
                     break
-            self._flush()
+        # Always do a final pretty-print flush for human readability
+        self._flush(pretty=True)
 
     def wait_for_writes(self):
         """Block until the write queue is drained."""
@@ -252,9 +269,27 @@ class Checkpoint:
         return len(self._data["completed"])
 
     def clear(self):
-        self._queue.join()
+        """Clear all checkpoint data safely.
+
+        Stops the background writer first to prevent a race condition
+        where a concurrent write could be lost between join() and flush().
+        """
+        # Stop the writer so no concurrent writes can interfere
+        self._stop.set()
+        self._writer.join(timeout=5)
+        # Drain any remaining items
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+                self._queue.task_done()
+            except queue.Empty:
+                break
         self._data = {"completed": {}, "meta": {}}
-        self._flush()
+        self._flush(pretty=True)
+        # Restart the writer for subsequent operations
+        self._stop.clear()
+        self._writer = threading.Thread(target=self._writer_loop, daemon=True)
+        self._writer.start()
 
 # ─────────────────────────────────────────────
 # INTERRUPT HANDLING
@@ -281,7 +316,7 @@ def _handle_sigint(sig, frame):
             _restore_terminal_state()
             sys.exit(1)
 
-signal.signal(signal.SIGINT, _handle_sigint)
+# signal.signal(signal.SIGINT, ...) is registered in main()
 
 # ─────────────────────────────────────────────
 # PROGRESS BAR  (tqdm or fallback)
@@ -318,6 +353,15 @@ def make_bar(total, desc):
 # ─────────────────────────────────────────────
 
 def probe_video(path: Path) -> dict | None:
+    """Probe video metadata via ffprobe.
+
+    Returns a dict with width, height, codec, has_audio, duration.
+    Returns None on failure — the caller should check the result.
+
+    Note: extract.py has its own simpler ``get_duration()`` that only
+    reads the format-level duration.  This function fetches full stream
+    metadata needed for detection heuristics (codec, audio, resolution).
+    """
     cmd = [
         "ffprobe", "-v", "quiet", "-print_format", "json",
         "-show_streams", "-show_format", str(path)
@@ -325,8 +369,12 @@ def probe_video(path: Path) -> dict | None:
     try:
         r    = subprocess.run(cmd, capture_output=True, text=True,
                               timeout=ENV["probe_timeout"])
+        if r.returncode != 0:
+            return None
         data = json.loads(r.stdout)
-    except Exception:
+    except subprocess.TimeoutExpired:
+        return None
+    except (json.JSONDecodeError, OSError):
         return None
 
     info = {"has_audio": False, "width": 0, "height": 0,
@@ -423,42 +471,43 @@ def extract_analysis_frames(path: Path, duration: float,
 # DETECTION LAYERS
 # ─────────────────────────────────────────────
 
-def layer1_global_motion(frames: list[np.ndarray]) -> float:
-    """Mean inter-frame pixel difference across all sampled frames."""
-    if len(frames) < 2:
+def layer1_global_motion(grays: list[np.ndarray]) -> float:
+    """Mean inter-frame pixel difference across all sampled frames.
+
+    Accepts pre-computed grayscale float32 arrays to avoid redundant
+    colour conversions (the caller converts once, both layers reuse).
+    """
+    if len(grays) < 2:
         return 0.0
     diffs = []
-    for i in range(1, len(frames)):
-        g1 = cv2.cvtColor(frames[i-1], cv2.COLOR_BGR2GRAY).astype(np.float32)
-        g2 = cv2.cvtColor(frames[i],   cv2.COLOR_BGR2GRAY).astype(np.float32)
-        diffs.append(float(np.mean(np.abs(g1 - g2))))
+    for i in range(1, len(grays)):
+        diffs.append(float(np.mean(np.abs(grays[i] - grays[i-1]))))
     return float(np.mean(diffs))
 
 
-def layer2_spatial_zones(frames: list[np.ndarray]) -> float:
+def layer2_spatial_zones(grays: list[np.ndarray]) -> float:
+    """Fraction of grid zones with significant motion.
+
+    Accepts pre-computed grayscale float32 arrays.
+    Uses vectorised numpy reshape instead of nested Python loops for
+    a ~20-30× speedup over the per-zone np.mean approach.
     """
-    Fraction of grid zones with significant motion.
-    Low fraction = motion concentrated in small overlay area = likely static bg.
-    """
-    if len(frames) < 2:
+    if len(grays) < 2:
         return 0.0
 
-    h, w        = frames[0].shape[:2]
+    h, w        = grays[0].shape[:2]
     zone_h      = max(1, h // GRID_ROWS)
     zone_w      = max(1, w // GRID_COLS)
+    # Crop to exact grid size so reshape works cleanly
+    gh, gw      = zone_h * GRID_ROWS, zone_w * GRID_COLS
     zone_motion = np.zeros((GRID_ROWS, GRID_COLS), dtype=np.float32)
 
-    for i in range(1, len(frames)):
-        g1   = cv2.cvtColor(frames[i-1], cv2.COLOR_BGR2GRAY).astype(np.float32)
-        g2   = cv2.cvtColor(frames[i],   cv2.COLOR_BGR2GRAY).astype(np.float32)
-        diff = np.abs(g1 - g2)
-        for r in range(GRID_ROWS):
-            for c in range(GRID_COLS):
-                zone_motion[r, c] += float(np.mean(
-                    diff[r*zone_h:(r+1)*zone_h, c*zone_w:(c+1)*zone_w]
-                ))
+    for i in range(1, len(grays)):
+        diff = np.abs(grays[i][:gh, :gw] - grays[i-1][:gh, :gw])
+        # Reshape into (GRID_ROWS, zone_h, GRID_COLS, zone_w) and average
+        zone_motion += diff.reshape(GRID_ROWS, zone_h, GRID_COLS, zone_w).mean(axis=(1, 3))
 
-    zone_motion /= max(len(frames) - 1, 1)
+    zone_motion /= max(len(grays) - 1, 1)
     active = int(np.sum(zone_motion > ZONE_MOTION_THRESH))
     return active / (GRID_ROWS * GRID_COLS)
 
@@ -560,8 +609,12 @@ def detect_video(video_path: Path, thresholds: dict, debug: bool = False) -> dic
 
     T = thresholds
 
+    # ── Pre-compute grayscale once — reused by both layer 1 and layer 2 ──
+    grays = [cv2.cvtColor(f, cv2.COLOR_BGR2GRAY).astype(np.float32)
+             for f in frames]
+
     # ── Layer 1: global motion ──
-    global_motion              = layer1_global_motion(frames)
+    global_motion              = layer1_global_motion(grays)
     row["global_motion_score"] = f"{global_motion:.3f}"
 
     # ── Early exit: obviously static (skip layers 2 & 3) ──
@@ -577,16 +630,17 @@ def detect_video(video_path: Path, thresholds: dict, debug: bool = False) -> dic
         row["decision"]          = "static"
         return row
 
-    # ── Early exit: obviously dynamic (skip layers 2 & 3) ──
+    # ── Early exit: obviously dynamic (skip layer 2, still log real heuristic) ──
     if global_motion > T["global_motion_review"] * 1.5:
-        row["active_zone_ratio"] = "1.000"
-        row["heuristic_score"]   = "0.000"
+        heuristic = layer3_heuristics(info)
+        row["active_zone_ratio"] = "skipped"
+        row["heuristic_score"]   = f"{heuristic:.3f}"
         row["final_confidence"]  = "0.000"
         row["decision"]          = "dynamic"
         return row
 
     # ── Layer 2: spatial zone analysis ──
-    zone_ratio               = layer2_spatial_zones(frames)
+    zone_ratio               = layer2_spatial_zones(grays)
     row["active_zone_ratio"] = f"{zone_ratio:.3f}"
 
     # ── Layer 3: heuristics ──
@@ -612,10 +666,13 @@ def detect_video(video_path: Path, thresholds: dict, debug: bool = False) -> dic
 # ─────────────────────────────────────────────
 
 def safe_move(src: Path, dst_dir: Path) -> Path:
+    """Move *src* into *dst_dir*, appending nanosecond timestamp on collision."""
     dst_dir.mkdir(parents=True, exist_ok=True)
     dst = dst_dir / src.name
     if dst.exists():
-        dst = dst_dir / f"{src.stem}_dup{int(time.time())}{src.suffix}"
+        # time.time_ns() gives nanosecond granularity — effectively unique
+        # even when multiple files are moved within the same second.
+        dst = dst_dir / f"{src.stem}_dup{time.time_ns()}{src.suffix}"
     shutil.move(str(src), str(dst))
     return dst
 
@@ -662,7 +719,7 @@ def print_report(rows: list[dict]):
 
 
 def print_summary(rows: list[dict], moved: bool, interrupted: bool,
-                  out_dirs: dict):
+                  out_dirs: dict, total_time: float = 0.0):
     counts: dict[str, int] = {}
     for r in rows:
         d = r.get("decision", "unknown")
@@ -682,6 +739,16 @@ def print_summary(rows: list[dict], moved: bool, interrupted: bool,
         print(f"  ❌ errors     {errors:>5}")
     print(f"  {'─'*30}")
     print(f"  total         {len(rows):>5}")
+
+    def fmt_time(seconds: float) -> str:
+        m, s = divmod(seconds, 60)
+        h, m = divmod(m, 60)
+        if h > 0: return f"{int(h)}h {int(m)}m {s:.1f}s"
+        if m > 0: return f"{int(m)}m {s:.1f}s"
+        return f"{s:.2f}s"
+
+    print(f"  {'─'*30}")
+    print(f"  total time    {fmt_time(total_time):>5}")
 
     if interrupted:
         print("\n⚠️  Interrupted — checkpoint saved. Re-run to resume.")
@@ -749,7 +816,13 @@ def check_dependencies():
 
 
 def main():
+    script_start_time = time.time()
     args   = parse_args()
+    # Register terminal state protection and signal handler
+    _save_terminal_state()
+    atexit.register(_restore_terminal_state)
+    signal.signal(signal.SIGINT, _handle_sigint)
+
     check_dependencies()
 
     folder = Path(args.folder).resolve()
@@ -761,7 +834,10 @@ def main():
         print("📱 Termux mode — workers capped at 2, no hardware acceleration")
 
     thresholds = SENSITIVITY_PRESETS[args.sensitivity]
-    workers    = min(args.workers or ENV["max_workers"], ENV["max_workers"])
+    requested  = args.workers or ENV["max_workers"]
+    workers    = min(requested, ENV["max_workers"])
+    if args.workers is not None and args.workers > workers:
+        print(f"⚠️  --workers {args.workers} exceeds platform cap; using {workers}")
 
     out_static  = folder / "static"
     out_dynamic = folder / "dynamic"
@@ -886,9 +962,12 @@ def main():
         writer.writeheader()
         writer.writerows(all_rows)
 
+    script_end_time = time.time()
+    total_time_taken = script_end_time - script_start_time
+
     # ── Output ──
     print_summary(all_rows, moved=args.move, interrupted=interrupted,
-                  out_dirs=out_dirs)
+                  out_dirs=out_dirs, total_time=total_time_taken)
 
     if args.report:
         print_report(all_rows)

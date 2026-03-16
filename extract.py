@@ -27,20 +27,24 @@ Examples:
 """
 
 import argparse
+import json
 import os
-import queue
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
-import termios
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import atexit
+
+try:
+    import termios
+except ImportError:
+    termios = None  # Not available on Windows/macOS without pty
 
 import cv2
 import numpy as np
@@ -64,6 +68,8 @@ _saved_term_attrs = None
 def _save_terminal_state():
     """Save current terminal attributes so we can restore them later."""
     global _saved_term_attrs
+    if termios is None:
+        return
     try:
         _saved_term_attrs = termios.tcgetattr(sys.stdin.fileno())
     except (termios.error, ValueError, OSError):
@@ -72,15 +78,16 @@ def _save_terminal_state():
 
 def _restore_terminal_state():
     """Restore terminal attributes saved at startup."""
-    if _saved_term_attrs is not None:
+    if _saved_term_attrs is not None and termios is not None:
         try:
             termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN,
                               _saved_term_attrs)
         except (termios.error, ValueError, OSError):
             pass
 
-_save_terminal_state()
-atexit.register(_restore_terminal_state)
+# Terminal state save/restore and signal handler registration
+# are deferred to main() so importing this module for tests
+# does not have side effects.
 
 # ─────────────────────────────────────────────
 # ENVIRONMENT DETECTION
@@ -136,7 +143,7 @@ def _handle_sigint(sig, frame):
             _restore_terminal_state()
             sys.exit(1)
 
-signal.signal(signal.SIGINT, _handle_sigint)
+# signal.signal(signal.SIGINT, ...) is registered in main()
 
 # ─────────────────────────────────────────────
 # PROGRESS BAR
@@ -173,7 +180,13 @@ def make_bar(total, desc):
 # ─────────────────────────────────────────────
 
 def get_duration(path: Path) -> float:
-    import json
+    """Return the duration of a video file in seconds via ffprobe.
+
+    This is a lighter probe than ``detect.py``'s ``probe_video()`` which
+    fetches full stream metadata (codec, resolution, audio).  Frame
+    extraction only needs the duration, so we query ``-show_format`` alone
+    to keep it fast.
+    """
     cmd = [
         "ffprobe", "-v", "quiet", "-print_format", "json",
         "-show_format", str(path)
@@ -198,7 +211,11 @@ def extract_full_res_frames(path: Path, duration: float) -> list[np.ndarray]:
     if duration <= 0:
         duration = 60.0
 
-    n       = min(40, max(8, int(duration * 1.5)))
+    # Cap total frames to limit peak RAM usage.  At 1080p each decoded
+    # frame is ~6 MB, so 20 frames ≈ 120 MB vs 40 frames ≈ 240 MB.
+    # On Termux (low RAM) we cap even lower to avoid OOM kills.
+    max_frames = 12 if ENV["is_termux"] else 20
+    n       = min(max_frames, max(8, int(duration * 1.5)))
     margin  = max(0.5, duration * 0.05)
     t_start = margin
     t_end   = max(t_start + 1.0, duration - margin)
@@ -222,8 +239,10 @@ def extract_full_res_frames(path: Path, duration: float) -> list[np.ndarray]:
             "-y", out,
         ]
         try:
-            result = subprocess.run(cmd, capture_output=True,
+            proc = subprocess.run(cmd, capture_output=True,
                                     timeout=ENV["ffmpeg_timeout"])
+            if proc.returncode != 0:
+                return []
         except Exception:
             return []
 
@@ -246,8 +265,10 @@ def extract_full_res_frames(path: Path, duration: float) -> list[np.ndarray]:
                 "-y", out,
             ]
             try:
-                subprocess.run(cmd_fallback, capture_output=True,
+                proc = subprocess.run(cmd_fallback, capture_output=True,
                                timeout=ENV["ffmpeg_timeout"])
+                if proc.returncode != 0:
+                    return frames
             except Exception:
                 return frames
             for fname in sorted(os.listdir(tmpdir)):
@@ -268,23 +289,25 @@ def pick_best_frame(frames: list[np.ndarray]) -> int:
     sharpest (highest Laplacian variance) frame.
     First and last frames are excluded (fade-in / fade-out).
     """
-    if len(frames) == 1:
-        return 0
-    if len(frames) == 2:
+    if len(frames) <= 2:
+        # Not enough frames for motion analysis; pick first (or only) frame.
+        # For 2 frames we could compare sharpness, but the margin is tiny.
         return 0
 
     n      = len(frames)
     motion = np.zeros(n, dtype=np.float64)
     sharp  = np.zeros(n, dtype=np.float64)
 
+    # Pre-compute grayscale once to avoid redundant conversions
+    grays = [cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) for f in frames]
+
     for i in range(n):
-        gray       = cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY)
-        sharp[i]   = cv2.Laplacian(gray.astype(np.float64), cv2.CV_64F).var()
+        sharp[i] = cv2.Laplacian(grays[i].astype(np.float64), cv2.CV_64F).var()
 
     for i in range(1, n - 1):
-        gp = cv2.cvtColor(frames[i-1], cv2.COLOR_BGR2GRAY).astype(np.float64)
-        gc = cv2.cvtColor(frames[i],   cv2.COLOR_BGR2GRAY).astype(np.float64)
-        gn = cv2.cvtColor(frames[i+1], cv2.COLOR_BGR2GRAY).astype(np.float64)
+        gp = grays[i-1].astype(np.float64)
+        gc = grays[i].astype(np.float64)
+        gn = grays[i+1].astype(np.float64)
         motion[i] = (np.mean(np.abs(gc - gp)) + np.mean(np.abs(gc - gn))) / 2.0
 
     def norm(a: np.ndarray) -> np.ndarray:
@@ -301,13 +324,13 @@ def pick_best_frame(frames: list[np.ndarray]) -> int:
 # ─────────────────────────────────────────────
 
 def extract_one(video_path: Path, output_dir: Path,
-                fmt: str, quality: int,
-                skip_existing: bool) -> dict:
-    """Extract best frame from one video. Returns status dict."""
-    out_path = output_dir / (video_path.stem + f".{fmt}")
+                fmt: str, quality: int) -> dict:
+    """Extract best frame from one video. Returns status dict.
 
-    if skip_existing and out_path.exists():
-        return {"file": video_path.name, "status": "skipped", "output": str(out_path)}
+    Callers are expected to pre-filter videos (e.g. via --skip-existing)
+    before submitting them to this function.
+    """
+    out_path = output_dir / (video_path.stem + f".{fmt}")
 
     duration = get_duration(video_path)
     frames   = extract_full_res_frames(video_path, duration)
@@ -350,11 +373,14 @@ def parse_args():
     p.add_argument("--format",       choices=["png", "jpg"], default="jpg",
                    help="Output format (default: jpg)")
     p.add_argument("--quality",      type=int, default=95,
-                   help="JPG quality 1-100 (default: 95)")
+                   help="JPG quality 1-100 (default: 95)",
+                   choices=range(1, 101), metavar="1-100")
     p.add_argument("--workers",      type=int, default=None,
                    help=f"Parallel workers (default: {ENV['max_workers']})")
     p.add_argument("--skip-existing", action="store_true",
                    help="Skip videos whose frame already exists")
+    p.add_argument("--fresh", action="store_true",
+                   help="Re-extract everything, ignoring skip list")
     return p.parse_args()
 
 
@@ -386,7 +412,14 @@ def check_dependencies():
 
 
 def main():
+    script_start_time = time.time()
     args = parse_args()
+
+    # Register terminal state protection and signal handler
+    _save_terminal_state()
+    atexit.register(_restore_terminal_state)
+    signal.signal(signal.SIGINT, _handle_sigint)
+
     check_dependencies()
 
     folder = Path(args.folder).resolve()
@@ -403,7 +436,10 @@ def main():
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    workers = min(args.workers or ENV["max_workers"], ENV["max_workers"])
+    requested = args.workers or ENV["max_workers"]
+    workers   = min(requested, ENV["max_workers"])
+    if args.workers is not None and args.workers > workers:
+        print(f"⚠️  --workers {args.workers} exceeds platform cap; using {workers}")
 
     # Collect videos (skip the output dir itself if nested)
     video_files = sorted([
@@ -416,7 +452,7 @@ def main():
         sys.exit(0)
 
     # Count how many will be skipped up front
-    if args.skip_existing:
+    if args.skip_existing and not args.fresh:
         to_process = [
             vp for vp in video_files
             if not (output_dir / (vp.stem + f".{args.format}")).exists()
@@ -446,7 +482,7 @@ def main():
                 break
             futures[executor.submit(
                 extract_one, vp, output_dir,
-                args.format, args.quality, args.skip_existing
+                args.format, args.quality
             )] = vp
 
         with make_bar(len(futures), "Extracting") as pbar:
@@ -480,6 +516,19 @@ def main():
     print(f"  ✅ Extracted  : {len(ok)}")
     print(f"  ⏭  Skipped   : {len(skipped) + skipped_count}")
     print(f"  ❌ Errors     : {len(errors)}")
+
+    def fmt_time(seconds: float) -> str:
+        m, s = divmod(seconds, 60)
+        h, m = divmod(m, 60)
+        if h > 0: return f"{int(h)}h {int(m)}m {s:.1f}s"
+        if m > 0: return f"{int(m)}m {s:.1f}s"
+        return f"{s:.2f}s"
+
+    script_end_time = time.time()
+    total_time_taken = script_end_time - script_start_time
+
+    print(f"  {'─'*32}")
+    print(f"  total time    : {fmt_time(total_time_taken)}")
 
     if errors:
         print("\n  Failed files:")

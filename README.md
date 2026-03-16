@@ -77,6 +77,7 @@ python detect.py /path/to/folder [options]
 | `--workers N` | auto | Parallel processing threads |
 | `--fresh` | off | Ignore checkpoint, re-detect everything |
 | `--report` | off | Print detailed per-video breakdown table after run |
+| `--debug` | off | Print ffmpeg stderr for failed frame extractions |
 
 ### Output Structure
 
@@ -113,6 +114,7 @@ python extract.py /path/to/folder [options]
 | `--quality 1-100` | `95` | JPG quality (ignored for PNG) |
 | `--workers N` | auto | Parallel processing threads |
 | `--skip-existing` | off | Skip videos whose frame already exists |
+| `--fresh` | off | Re-extract everything, ignoring skip list |
 
 ### Output
 
@@ -124,7 +126,7 @@ Frames are saved as `<video_stem>.jpg` (or `.png`) in the output directory.
 
 ### Layer 1 — Global Motion Score
 
-Samples frames evenly across the video (5–16 depending on duration) and computes
+Samples frames evenly across the video (2–16 depending on duration) and computes
 the mean pixel difference between consecutive frames. A low score means very
 little changes frame-to-frame → likely a static image.
 
@@ -140,7 +142,8 @@ This catches Instagram stories with GIF stickers and lyric overlays.
 Boosts confidence based on metadata signals:
 - **Portrait/square aspect ratio** — Instagram story/post
 - **Audio stream present** — music video
-- **Short duration** — under 10 minutes
+- **Short duration** — videos under 5s and 10s receive reduced confidence to avoid false positives;
+  videos under 10 minutes get a moderate boost
 - **Common repost codec** — H.264 / HEVC
 
 ### Final Decision
@@ -210,6 +213,7 @@ python extract.py ~/Videos/static --skip-existing
 
 Both scripts auto-detect Termux and adjust:
 - **Workers** capped at 2 to avoid memory issues
+- **Frame extraction** limited to 12 frames (vs 20 on Linux) to reduce RAM usage
 - **Timeouts** extended for slower storage (SD card / FUSE)
 
 Install dependencies in Termux:
