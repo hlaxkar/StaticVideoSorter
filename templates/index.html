@@ -24,12 +24,11 @@
         <section id="tab-detect" class="tab-content active">
             <div class="form-section">
                 <div class="field">
-                    <label for="detect-folder">Folder</label>
-                    <div class="input-group">
-                        <div class="autocomplete-wrapper">
-                            <input type="text" id="detect-folder" placeholder="/home/user/videos" autocomplete="off">
-                            <div class="autocomplete-dropdown" id="detect-folder-dropdown"></div>
-                        </div>
+                    <label>Folder</label>
+                    <div class="folder-picker-field">
+                        <span class="folder-picker-path" id="detect-folder-display">No folder selected</span>
+                        <input type="hidden" id="detect-folder" value="">
+                        <button class="btn" data-picker-target="detect-folder">Browse</button>
                     </div>
                 </div>
 
@@ -89,13 +88,12 @@
         <section id="tab-review" class="tab-content">
             <div class="form-section">
                 <div class="field">
-                    <label for="review-folder">Folder</label>
-                    <div class="input-group">
-                        <div class="autocomplete-wrapper">
-                            <input type="text" id="review-folder" placeholder="/home/user/videos" autocomplete="off">
-                            <div class="autocomplete-dropdown" id="review-folder-dropdown"></div>
-                        </div>
-                        <button id="review-load-btn" class="btn">Load</button>
+                    <label>Folder</label>
+                    <div class="folder-picker-field">
+                        <span class="folder-picker-path" id="review-folder-display">No folder selected</span>
+                        <input type="hidden" id="review-folder" value="">
+                        <button class="btn" data-picker-target="review-folder">Browse</button>
+                        <button id="review-load-btn" class="btn btn-primary">Load</button>
                     </div>
                 </div>
             </div>
@@ -146,18 +144,22 @@
         <section id="tab-extract" class="tab-content">
             <div class="form-section">
                 <div class="field">
-                    <label for="extract-folder">Folder</label>
-                    <div class="input-group">
-                        <div class="autocomplete-wrapper">
-                            <input type="text" id="extract-folder" placeholder="/home/user/videos/static" autocomplete="off">
-                            <div class="autocomplete-dropdown" id="extract-folder-dropdown"></div>
-                        </div>
+                    <label>Source Folder</label>
+                    <div class="folder-picker-field">
+                        <span class="folder-picker-path" id="extract-folder-display">No folder selected</span>
+                        <input type="hidden" id="extract-folder" value="">
+                        <button class="btn" data-picker-target="extract-folder">Browse</button>
                     </div>
                 </div>
 
                 <div class="field">
-                    <label for="extract-output">Output</label>
-                    <input type="text" id="extract-output" placeholder="(default: <folder>/extracted_frames/)">
+                    <label>Output Folder <span class="muted">(optional)</span></label>
+                    <div class="folder-picker-field">
+                        <span class="folder-picker-path" id="extract-output-display">Default: &lt;folder&gt;/extracted_frames/</span>
+                        <input type="hidden" id="extract-output" value="">
+                        <button class="btn" data-picker-target="extract-output">Browse</button>
+                        <button class="btn btn-small btn-muted" id="extract-output-clear">Clear</button>
+                    </div>
                 </div>
 
                 <div class="field">
@@ -272,6 +274,28 @@
     </main>
 
     <div id="toast-container"></div>
+
+    <!-- ═══════════ FOLDER PICKER MODAL ═══════════ -->
+    <div id="folder-picker-modal" class="fp-modal hidden" role="dialog" aria-modal="true" aria-label="Select folder">
+        <div class="fp-backdrop"></div>
+        <div class="fp-panel">
+            <div class="fp-header">
+                <span class="fp-title">Select Folder</span>
+                <button class="fp-close btn btn-small" aria-label="Close">&times;</button>
+            </div>
+            <div class="fp-breadcrumb" id="fp-breadcrumb"></div>
+            <div class="fp-list" id="fp-list">
+                <div class="fp-loading">Loading...</div>
+            </div>
+            <div class="fp-footer">
+                <span class="fp-current-path" id="fp-current-path"></span>
+                <div class="fp-actions">
+                    <button id="fp-cancel-btn" class="btn">Cancel</button>
+                    <button id="fp-select-btn" class="btn btn-primary">Select This Folder</button>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <script src="/static/app.js"></script>
 </body>

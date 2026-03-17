@@ -14,6 +14,12 @@
     function show(el) { el.classList.remove("hidden"); }
     function hide(el) { el.classList.add("hidden"); }
 
+    function escapeHtml(str) {
+        const div = document.createElement("div");
+        div.textContent = str;
+        return div.innerHTML;
+    }
+
     function toast(msg, isError) {
         const container = $("#toast-container");
         const t = document.createElement("div");
@@ -32,9 +38,7 @@
             }
             return resp.json();
         } catch (e) {
-            if (e.message === "Failed to fetch") {
-                toast("Server not responding", true);
-            }
+            if (e.message === "Failed to fetch") toast("Server not responding", true);
             throw e;
         }
     }
@@ -51,98 +55,175 @@
 
     tabs.forEach(t => t.addEventListener("click", () => switchTab(t.dataset.tab)));
 
-    // ─── Autocomplete ───
+    // ═══════════ FOLDER PICKER MODAL ═══════════
 
-    function setupAutocomplete(inputEl, dropdownEl) {
-        let debounceTimer = null;
-        let items = [];
-        let selectedIdx = -1;
+    const fpModal       = $("#folder-picker-modal");
+    const fpList        = $("#fp-list");
+    const fpBreadcrumb  = $("#fp-breadcrumb");
+    const fpCurrentPath = $("#fp-current-path");
+    const fpSelectBtn   = $("#fp-select-btn");
+    const fpCancelBtn   = $("#fp-cancel-btn");
 
-        function render() {
-            dropdownEl.innerHTML = "";
-            if (items.length === 0) {
-                dropdownEl.classList.remove("open");
-                return;
+    let fpTargetId   = null;
+    let fpCurrentDir = "";
+    let fpOnSelect   = null;
+
+    // Map hidden-input id → display span id
+    const DISPLAY_MAP = {
+        "detect-folder":  "detect-folder-display",
+        "review-folder":  "review-folder-display",
+        "extract-folder": "extract-folder-display",
+        "extract-output": "extract-output-display",
+    };
+
+    // Per-target callbacks called after selection (register below in each tab section)
+    const PICKER_CALLBACKS = {};
+
+    function setFolderValue(inputId, path) {
+        const input   = document.getElementById(inputId);
+        const display = document.getElementById(DISPLAY_MAP[inputId]);
+        if (!input) return;
+        input.value = path;
+        if (display) {
+            if (path) {
+                display.textContent = path;
+                display.classList.remove("placeholder");
+            } else {
+                display.textContent = display.dataset.placeholder || "No folder selected";
+                display.classList.add("placeholder");
             }
-            items.forEach((name, i) => {
-                const div = document.createElement("div");
-                div.className = "autocomplete-item" + (i === selectedIdx ? " selected" : "");
-                div.textContent = name;
-                div.addEventListener("mousedown", (e) => {
-                    e.preventDefault();
-                    select(name);
-                });
-                dropdownEl.appendChild(div);
+        }
+    }
+
+    function getFolderValue(inputId) {
+        const input = document.getElementById(inputId);
+        return input ? input.value.trim() : "";
+    }
+
+    async function fpNavigate(path) {
+        fpCurrentDir = path;
+        fpCurrentPath.textContent = path;
+        fpList.innerHTML = '<div class="fp-loading">Loading...</div>';
+        renderBreadcrumb(path);
+
+        try {
+            const data = await api("/api/browse?path=" + encodeURIComponent(path));
+            fpCurrentDir = data.current || path;
+            fpCurrentPath.textContent = fpCurrentDir;
+            renderBreadcrumb(fpCurrentDir);
+            renderDirList(data.dirs || []);
+        } catch (e) {
+            fpList.innerHTML = '<div class="fp-empty">Could not read directory.</div>';
+        }
+    }
+
+    function renderBreadcrumb(path) {
+        fpBreadcrumb.innerHTML = "";
+        const parts    = path.split("/").filter((p, i) => i === 0 || p !== "");
+        const segments = [];
+        let accumulated = "";
+
+        for (let i = 0; i < parts.length; i++) {
+            if (i === 0 && parts[i] === "") {
+                accumulated = "/";
+                segments.push({ label: "/", path: "/" });
+            } else {
+                accumulated = (accumulated === "/" ? "/" : accumulated + "/") + parts[i];
+                segments.push({ label: parts[i], path: accumulated });
+            }
+        }
+
+        segments.forEach((seg, i) => {
+            const isLast = i === segments.length - 1;
+            const crumb  = document.createElement("span");
+            crumb.className = "fp-crumb" + (isLast ? " current" : "");
+            crumb.textContent = seg.label;
+            if (!isLast) crumb.addEventListener("click", () => fpNavigate(seg.path));
+            fpBreadcrumb.appendChild(crumb);
+
+            if (!isLast) {
+                const sep = document.createElement("span");
+                sep.className   = "fp-crumb-sep";
+                sep.textContent = "/";
+                fpBreadcrumb.appendChild(sep);
+            }
+        });
+
+        fpBreadcrumb.scrollLeft = fpBreadcrumb.scrollWidth;
+    }
+
+    function renderDirList(dirs) {
+        fpList.innerHTML = "";
+
+        if (dirs.length === 0) {
+            fpList.innerHTML = '<div class="fp-empty">No subfolders here.</div>';
+            return;
+        }
+
+        dirs.forEach(name => {
+            const item = document.createElement("div");
+            item.className = "fp-item";
+            item.innerHTML = `<span class="fp-item-icon">📁</span><span>${escapeHtml(name)}</span>`;
+            item.addEventListener("click", () => {
+                const child = (fpCurrentDir === "/" ? "/" : fpCurrentDir + "/") + name;
+                fpNavigate(child);
             });
-            dropdownEl.classList.add("open");
-        }
-
-        function select(name) {
-            const current = inputEl.value.replace(/\/+$/, "");
-            inputEl.value = current + "/" + name;
-            items = [];
-            selectedIdx = -1;
-            dropdownEl.classList.remove("open");
-            // Trigger another browse for the new path
-            fetchDirs(inputEl.value);
-        }
-
-        async function fetchDirs(path) {
-            try {
-                const data = await api("/api/browse?path=" + encodeURIComponent(path));
-                items = data.dirs || [];
-                selectedIdx = -1;
-                render();
-            } catch (e) {
-                items = [];
-                render();
-            }
-        }
-
-        inputEl.addEventListener("input", () => {
-            clearTimeout(debounceTimer);
-            debounceTimer = setTimeout(() => fetchDirs(inputEl.value), 200);
-        });
-
-        inputEl.addEventListener("keydown", (e) => {
-            if (!dropdownEl.classList.contains("open")) return;
-            if (e.key === "ArrowDown") {
-                e.preventDefault();
-                selectedIdx = Math.min(selectedIdx + 1, items.length - 1);
-                render();
-            } else if (e.key === "ArrowUp") {
-                e.preventDefault();
-                selectedIdx = Math.max(selectedIdx - 1, 0);
-                render();
-            } else if (e.key === "Enter" && selectedIdx >= 0) {
-                e.preventDefault();
-                select(items[selectedIdx]);
-            } else if (e.key === "Escape") {
-                dropdownEl.classList.remove("open");
-            }
-        });
-
-        inputEl.addEventListener("blur", () => {
-            setTimeout(() => dropdownEl.classList.remove("open"), 150);
-        });
-
-        inputEl.addEventListener("focus", () => {
-            if (inputEl.value) fetchDirs(inputEl.value);
+            fpList.appendChild(item);
         });
     }
 
-    setupAutocomplete($("#detect-folder"), $("#detect-folder-dropdown"));
-    setupAutocomplete($("#review-folder"), $("#review-folder-dropdown"));
-    setupAutocomplete($("#extract-folder"), $("#extract-folder-dropdown"));
+    function openFolderPicker(targetId, onSelect) {
+        fpTargetId = targetId;
+        fpOnSelect = onSelect || null;
+        const startPath = getFolderValue(targetId) || "";
+        fpModal.classList.remove("hidden");
+        document.body.style.overflow = "hidden";
+        fpNavigate(startPath);
+    }
+
+    function closeFolderPicker() {
+        fpModal.classList.add("hidden");
+        document.body.style.overflow = "";
+        fpTargetId = null;
+        fpOnSelect = null;
+    }
+
+    fpSelectBtn.addEventListener("click", () => {
+        if (!fpTargetId || !fpCurrentDir) return;
+        setFolderValue(fpTargetId, fpCurrentDir);
+        const cb = fpOnSelect;
+        closeFolderPicker();
+        if (cb) cb(fpCurrentDir);
+    });
+
+    fpCancelBtn.addEventListener("click", closeFolderPicker);
+    $(".fp-close").addEventListener("click", closeFolderPicker);
+    $(".fp-backdrop").addEventListener("click", closeFolderPicker);
+
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && !fpModal.classList.contains("hidden")) closeFolderPicker();
+    });
+
+    // Wire up all Browse buttons — callbacks come from PICKER_CALLBACKS
+    $$("[data-picker-target]").forEach(btn => {
+        btn.addEventListener("click", () => {
+            const targetId = btn.dataset.pickerTarget;
+            openFolderPicker(targetId, PICKER_CALLBACKS[targetId] || null);
+        });
+    });
+
+    // Mark unset display spans as placeholder
+    Object.keys(DISPLAY_MAP).forEach(inputId => {
+        const display = document.getElementById(DISPLAY_MAP[inputId]);
+        if (display && !getFolderValue(inputId)) display.classList.add("placeholder");
+    });
 
     // ═══════════ DETECT TAB ═══════════
 
     let detectJobId = null;
     let detectEventSource = null;
 
-    // Checkpoint check on folder blur
-    $("#detect-folder").addEventListener("blur", async () => {
-        const folder = $("#detect-folder").value.trim();
+    async function checkCheckpoint(folder) {
         if (!folder) return;
         try {
             const data = await api("/api/checkpoint?folder=" + encodeURIComponent(folder));
@@ -156,16 +237,17 @@
         } catch (e) {
             hide($("#detect-checkpoint-banner"));
         }
-    });
+    }
+
+    PICKER_CALLBACKS["detect-folder"] = (path) => checkCheckpoint(path);
 
     function startDetection(fresh) {
-        const folder = $("#detect-folder").value.trim();
-        if (!folder) { toast("Enter a folder path", true); return; }
+        const folder = getFolderValue("detect-folder");
+        if (!folder) { toast("Select a folder first", true); return; }
 
         const sensitivity = document.querySelector('input[name="sensitivity"]:checked').value;
-        const workers = parseInt($("#detect-workers").value) || 4;
+        const workers     = parseInt($("#detect-workers").value) || 4;
 
-        // Reset UI
         $("#detect-log").innerHTML = "";
         show($("#detect-log"));
         show($("#detect-progress-section"));
@@ -178,6 +260,7 @@
         hide($("#detect-checkpoint-banner"));
         $("#detect-progress-bar").style.width = "0%";
         $("#detect-progress-count").textContent = "";
+        $("#detect-progress-label").textContent = "Detecting...";
 
         api("/api/detect", {
             method: "POST",
@@ -186,7 +269,6 @@
         }).then(data => {
             detectJobId = data.job_id;
             detectEventSource = new EventSource("/api/detect/" + detectJobId + "/stream");
-
             detectEventSource.onmessage = (event) => {
                 const msg = JSON.parse(event.data);
                 if (msg.type === "progress") onDetectProgress(msg);
@@ -194,10 +276,7 @@
                 if (msg.type === "done")     onDetectDone();
                 if (msg.type === "error")    onDetectError(msg.message);
             };
-
-            detectEventSource.onerror = () => {
-                // SSE auto-reconnects
-            };
+            detectEventSource.onerror = () => {};
         }).catch(e => {
             toast("Failed to start detection: " + e.message, true);
             resetDetectUI();
@@ -209,14 +288,12 @@
         $("#detect-progress-bar").style.width = pct + "%";
         $("#detect-progress-count").textContent = `${msg.done} / ${msg.total}`;
 
-        const log = $("#detect-log");
+        const log   = $("#detect-log");
         const entry = document.createElement("div");
         entry.className = "log-entry";
 
-        const decision = msg.decision || "unknown";
-        let resultClass = decision;
-        if (decision.startsWith("error")) resultClass = "error";
-
+        const decision   = msg.decision || "unknown";
+        const resultClass = decision.startsWith("error") ? "error" : decision;
         entry.innerHTML =
             `<span class="filename">${escapeHtml(msg.filename)}</span>` +
             `<span class="result ${resultClass}">${escapeHtml(decision)}</span>` +
@@ -227,12 +304,11 @@
 
     function onDetectSummary(msg) {
         show($("#detect-summary"));
-        $("#sum-static").textContent = msg.static || 0;
+        $("#sum-static").textContent  = msg.static  || 0;
         $("#sum-dynamic").textContent = msg.dynamic || 0;
-        $("#sum-review").textContent = msg.review || 0;
-        $("#sum-errors").textContent = msg.errors || 0;
-        $("#sum-space").textContent = (msg.space_saved_mb || 0) + " MB";
-
+        $("#sum-review").textContent  = msg.review  || 0;
+        $("#sum-errors").textContent  = msg.errors  || 0;
+        $("#sum-space").textContent   = (msg.space_saved_mb || 0) + " MB";
         show($("#detect-post-actions"));
         if ((msg.review || 0) > 0) show($("#goto-review-btn"));
         if ((msg.static || 0) > 0) show($("#goto-extract-btn"));
@@ -255,50 +331,45 @@
         hide($("#detect-cancel-btn"));
     }
 
-    $("#detect-run-btn").addEventListener("click", () => startDetection(false));
+    $("#detect-run-btn").addEventListener("click",    () => startDetection(false));
     $("#detect-resume-btn").addEventListener("click", () => startDetection(false));
-    $("#detect-fresh-btn").addEventListener("click", () => startDetection(true));
-
+    $("#detect-fresh-btn").addEventListener("click",  () => startDetection(true));
     $("#detect-cancel-btn").addEventListener("click", () => {
-        if (detectJobId) {
-            api("/api/detect/" + detectJobId + "/cancel", { method: "POST" })
-                .catch(() => {});
-        }
+        if (detectJobId) api("/api/detect/" + detectJobId + "/cancel", { method: "POST" }).catch(() => {});
     });
 
-    // Post-action buttons
     $("#goto-review-btn").addEventListener("click", () => {
-        const folder = $("#detect-folder").value.trim();
-        $("#review-folder").value = folder;
+        const folder = getFolderValue("detect-folder");
+        setFolderValue("review-folder", folder);
         switchTab("review");
         loadReview();
     });
 
     $("#goto-extract-btn").addEventListener("click", () => {
-        const folder = $("#detect-folder").value.trim();
-        $("#extract-folder").value = folder + "/static";
+        const folder = getFolderValue("detect-folder");
+        setFolderValue("extract-folder", folder ? folder + "/static" : "");
         switchTab("extract");
     });
 
     // ═══════════ REVIEW TAB ═══════════
 
-    let reviewVideos = [];
-    let reviewIndex = 0;
+    let reviewVideos     = [];
+    let reviewIndex      = 0;
     let reviewBaseFolder = "";
 
     async function loadReview() {
-        const folder = $("#review-folder").value.trim();
-        if (!folder) { toast("Enter a folder path", true); return; }
+        const folder = getFolderValue("review-folder");
+        if (!folder) { toast("Select a folder first", true); return; }
         reviewBaseFolder = folder;
 
         try {
-            const data = await api("/api/review?folder=" + encodeURIComponent(folder));
+            const data  = await api("/api/review?folder=" + encodeURIComponent(folder));
             reviewVideos = data.videos || [];
 
             if (reviewVideos.length === 0) {
                 hide($("#review-player-area"));
                 show($("#review-done-msg"));
-                $("#review-done-msg").textContent = "No videos to review.";
+                $("#review-done-msg").textContent = "No videos in the review subfolder.";
                 hide($("#review-count"));
                 return;
             }
@@ -316,36 +387,32 @@
 
     function showReviewVideo() {
         if (reviewIndex < 0 || reviewIndex >= reviewVideos.length) return;
-        const v = reviewVideos[reviewIndex];
+        const v     = reviewVideos[reviewIndex];
         const video = $("#review-video");
-        const overlay = $("#review-play-overlay");
 
         video.src = "/api/video?path=" + encodeURIComponent(v.path);
         video.load();
 
-        // Autoplay handling
         if (IS_TOUCH) {
-            show(overlay);
+            show($("#review-play-overlay"));
         } else {
-            hide(overlay);
-            video.play().catch(() => show(overlay));
+            hide($("#review-play-overlay"));
+            video.play().catch(() => show($("#review-play-overlay")));
         }
 
-        $("#review-filename").textContent = v.filename;
+        $("#review-filename").textContent   = v.filename;
         $("#review-confidence").textContent = v.confidence || "—";
-        $("#review-motion").textContent = v.global_motion_score || "—";
-        $("#review-duration").textContent = v.duration_s ? v.duration_s + "s" : "—";
-        $("#review-size").textContent = (v.width && v.height) ? v.width + "x" + v.height : "—";
-        $("#review-position").textContent = (reviewIndex + 1) + " / " + reviewVideos.length;
+        $("#review-motion").textContent     = v.global_motion_score || "—";
+        $("#review-duration").textContent   = v.duration_s ? v.duration_s + "s" : "—";
+        $("#review-size").textContent       = (v.width && v.height) ? v.width + "x" + v.height : "—";
+        $("#review-position").textContent   = (reviewIndex + 1) + " / " + reviewVideos.length;
 
         $("#review-prev-btn").disabled = reviewIndex === 0;
         $("#review-next-btn").disabled = reviewIndex === reviewVideos.length - 1;
     }
 
-    // Play overlay tap
     $("#review-play-overlay").addEventListener("click", () => {
-        const video = $("#review-video");
-        video.play().then(() => hide($("#review-play-overlay"))).catch(() => {});
+        $("#review-video").play().then(() => hide($("#review-play-overlay"))).catch(() => {});
     });
 
     async function reviewDecide(decision) {
@@ -356,52 +423,36 @@
             await api("/api/review/decide", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    path: v.path,
-                    decision: decision,
-                    base_folder: reviewBaseFolder,
-                }),
+                body: JSON.stringify({ path: v.path, decision, base_folder: reviewBaseFolder }),
             });
-
-            // Mark this video as decided
             v._decided = decision;
 
-            // Move to next
             if (reviewIndex < reviewVideos.length - 1) {
                 reviewIndex++;
                 showReviewVideo();
             } else {
-                // All done
                 hide($("#review-player-area"));
                 show($("#review-done-msg"));
-                const decidedCount = reviewVideos.filter(x => x._decided).length;
-                $("#review-done-msg").textContent =
-                    `All done! ${decidedCount} video(s) reviewed.`;
+                const n = reviewVideos.filter(x => x._decided).length;
+                $("#review-done-msg").textContent = `All done! ${n} video(s) reviewed.`;
             }
         } catch (e) {
             toast("Review error: " + e.message, true);
         }
     }
 
-    $("#review-load-btn").addEventListener("click", loadReview);
-    $("#review-static-btn").addEventListener("click", () => reviewDecide("static"));
+    $("#review-load-btn").addEventListener("click",    loadReview);
+    $("#review-static-btn").addEventListener("click",  () => reviewDecide("static"));
     $("#review-dynamic-btn").addEventListener("click", () => reviewDecide("dynamic"));
-    $("#review-skip-btn").addEventListener("click", () => reviewDecide("skip"));
-    $("#review-prev-btn").addEventListener("click", () => {
-        if (reviewIndex > 0) { reviewIndex--; showReviewVideo(); }
-    });
-    $("#review-next-btn").addEventListener("click", () => {
-        if (reviewIndex < reviewVideos.length - 1) { reviewIndex++; showReviewVideo(); }
-    });
+    $("#review-skip-btn").addEventListener("click",    () => reviewDecide("skip"));
+    $("#review-prev-btn").addEventListener("click", () => { if (reviewIndex > 0) { reviewIndex--; showReviewVideo(); } });
+    $("#review-next-btn").addEventListener("click", () => { if (reviewIndex < reviewVideos.length - 1) { reviewIndex++; showReviewVideo(); } });
 
-    // Keyboard shortcuts
     document.addEventListener("keydown", (e) => {
-        // Don't trigger when typing in inputs
         if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
-        // Only when review tab is active
+        if (!fpModal.classList.contains("hidden")) return;
         if (!$("#tab-review").classList.contains("active")) return;
         if (!reviewVideos.length) return;
-
         if (e.key === "s" || e.key === "S") { e.preventDefault(); reviewDecide("static"); }
         if (e.key === "d" || e.key === "D") { e.preventDefault(); reviewDecide("dynamic"); }
         if (e.key === " ")                  { e.preventDefault(); reviewDecide("skip"); }
@@ -412,31 +463,37 @@
     let extractJobId = null;
     let extractEventSource = null;
 
-    // Quality slider
     $("#extract-quality").addEventListener("input", (e) => {
         $("#extract-quality-value").textContent = e.target.value;
     });
 
-    // Format toggle — hide quality for PNG
     $$('input[name="extract-format"]').forEach(r => {
         r.addEventListener("change", () => {
             const isPng = document.querySelector('input[name="extract-format"]:checked').value === "png";
             if (isPng) hide($("#extract-quality-field"));
-            else show($("#extract-quality-field"));
+            else        show($("#extract-quality-field"));
         });
     });
 
-    function startExtraction() {
-        const folder = $("#extract-folder").value.trim();
-        if (!folder) { toast("Enter a folder path", true); return; }
+    $("#extract-output-clear").addEventListener("click", () => {
+        setFolderValue("extract-output", "");
+        const display = $("#extract-output-display");
+        if (display) {
+            display.textContent = "Default: <folder>/extracted_frames/";
+            display.classList.add("placeholder");
+        }
+    });
 
-        const fmt     = document.querySelector('input[name="extract-format"]:checked').value;
-        const quality = parseInt($("#extract-quality").value) || 95;
-        const workers = parseInt($("#extract-workers").value) || 4;
-        const output  = $("#extract-output").value.trim() || null;
+    function startExtraction() {
+        const folder = getFolderValue("extract-folder");
+        if (!folder) { toast("Select a source folder first", true); return; }
+
+        const fmt          = document.querySelector('input[name="extract-format"]:checked').value;
+        const quality      = parseInt($("#extract-quality").value) || 95;
+        const workers      = parseInt($("#extract-workers").value) || 4;
+        const output       = getFolderValue("extract-output") || null;
         const skipExisting = $("#extract-skip-existing").checked;
 
-        // Reset UI
         $("#extract-log").innerHTML = "";
         show($("#extract-log"));
         show($("#extract-progress-section"));
@@ -446,25 +503,21 @@
         show($("#extract-cancel-btn"));
         $("#extract-progress-bar").style.width = "0%";
         $("#extract-progress-count").textContent = "";
+        $("#extract-progress-label").textContent = "Extracting...";
 
         api("/api/extract", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                folder, output_dir: output, format: fmt,
-                quality, workers, skip_existing: skipExisting,
-            }),
+            body: JSON.stringify({ folder, output_dir: output, format: fmt, quality, workers, skip_existing: skipExisting }),
         }).then(data => {
             extractJobId = data.job_id;
             extractEventSource = new EventSource("/api/extract/" + extractJobId + "/stream");
-
             extractEventSource.onmessage = (event) => {
                 const msg = JSON.parse(event.data);
                 if (msg.type === "progress") onExtractProgress(msg);
                 if (msg.type === "done")     onExtractDone(msg);
                 if (msg.type === "error")    onExtractError(msg.message);
             };
-
             extractEventSource.onerror = () => {};
         }).catch(e => {
             toast("Failed to start extraction: " + e.message, true);
@@ -477,16 +530,13 @@
         $("#extract-progress-bar").style.width = pct + "%";
         $("#extract-progress-count").textContent = `${msg.done} / ${msg.total}`;
 
-        const log = $("#extract-log");
+        const log   = $("#extract-log");
         const entry = document.createElement("div");
         entry.className = "log-entry";
-
         const status = msg.status || "unknown";
-        let resultClass = status === "ok" ? "ok" : "error";
-
         entry.innerHTML =
             `<span class="filename">${escapeHtml(msg.filename)}</span>` +
-            `<span class="result ${resultClass}">${escapeHtml(status)}</span>`;
+            `<span class="result ${status === "ok" ? "ok" : "error"}">${escapeHtml(status)}</span>`;
         log.appendChild(entry);
         log.scrollTop = log.scrollHeight;
     }
@@ -496,15 +546,12 @@
         resetExtractUI();
         $("#extract-progress-label").textContent = "Complete";
 
-        // Show summary if we have it
         if (msg.extracted !== undefined) {
             show($("#extract-summary"));
             $("#ext-sum-extracted").textContent = msg.extracted || 0;
-            $("#ext-sum-skipped").textContent = msg.skipped || 0;
-            $("#ext-sum-errors").textContent = msg.errors || 0;
+            $("#ext-sum-skipped").textContent   = msg.skipped   || 0;
+            $("#ext-sum-errors").textContent    = msg.errors    || 0;
         }
-
-        // Load gallery
         loadGallery();
     }
 
@@ -520,34 +567,32 @@
     }
 
     async function loadGallery() {
-        const folder = $("#extract-folder").value.trim();
+        const folder = getFolderValue("extract-folder");
         if (!folder) return;
 
         try {
-            const data = await api("/api/frames?folder=" + encodeURIComponent(folder));
+            const data   = await api("/api/frames?folder=" + encodeURIComponent(folder));
             const frames = data.frames || [];
             if (frames.length === 0) return;
 
             const gallery = $("#extract-gallery");
             gallery.innerHTML = "";
             show(gallery);
-
             frames.forEach(f => {
                 const thumb = document.createElement("div");
                 thumb.className = "gallery-thumb";
-                thumb.innerHTML = `<img src="/api/image?path=${encodeURIComponent(f.path)}" loading="lazy" alt="${escapeHtml(f.filename)}">`;
+                thumb.innerHTML =
+                    `<img src="/api/image?path=${encodeURIComponent(f.path)}" ` +
+                    `loading="lazy" alt="${escapeHtml(f.filename)}">`;
                 thumb.addEventListener("click", () => openLightbox(f.path));
                 gallery.appendChild(thumb);
             });
-        } catch (e) {
-            // Gallery load failed, that's fine
-        }
+        } catch (e) { /* non-critical */ }
     }
 
     function openLightbox(path) {
-        const lb = $("#lightbox");
         $("#lightbox-img").src = "/api/image?path=" + encodeURIComponent(path);
-        show(lb);
+        show($("#lightbox"));
     }
 
     function closeLightbox() {
@@ -557,22 +602,16 @@
 
     $(".lightbox-backdrop").addEventListener("click", closeLightbox);
     document.addEventListener("keydown", (e) => {
-        if (e.key === "Escape" && !$("#lightbox").classList.contains("hidden")) {
-            closeLightbox();
-        }
+        if (e.key === "Escape" && !$("#lightbox").classList.contains("hidden")) closeLightbox();
     });
 
-    $("#extract-run-btn").addEventListener("click", startExtraction);
+    $("#extract-run-btn").addEventListener("click",    startExtraction);
     $("#extract-cancel-btn").addEventListener("click", () => {
-        if (extractJobId) {
-            api("/api/extract/" + extractJobId + "/cancel", { method: "POST" })
-                .catch(() => {});
-        }
+        if (extractJobId) api("/api/extract/" + extractJobId + "/cancel", { method: "POST" }).catch(() => {});
     });
 
     // ═══════════ SETTINGS TAB ═══════════
 
-    // Settings quality slider
     $("#cfg-quality").addEventListener("input", (e) => {
         $("#cfg-quality-value").textContent = e.target.value;
     });
@@ -581,44 +620,30 @@
         try {
             const cfg = await api("/api/config");
 
-            // Sensitivity
-            const sensRadio = document.querySelector(`input[name="cfg-sensitivity"][value="${cfg.sensitivity || "medium"}"]`);
-            if (sensRadio) sensRadio.checked = true;
-
-            // Workers
+            const sensEl = document.querySelector(`input[name="cfg-sensitivity"][value="${cfg.sensitivity || "medium"}"]`);
+            if (sensEl) sensEl.checked = true;
             $("#cfg-workers").value = cfg.workers || 4;
-
-            // Format
-            const fmtRadio = document.querySelector(`input[name="cfg-format"][value="${cfg.output_format || "jpg"}"]`);
-            if (fmtRadio) fmtRadio.checked = true;
-
-            // Quality
+            const fmtEl = document.querySelector(`input[name="cfg-format"][value="${cfg.output_format || "jpg"}"]`);
+            if (fmtEl) fmtEl.checked = true;
             $("#cfg-quality").value = cfg.quality || 95;
             $("#cfg-quality-value").textContent = cfg.quality || 95;
 
-            // Apply to other tabs
             applyConfigDefaults(cfg);
-        } catch (e) {
-            // Config load failed, use defaults
-        }
+        } catch (e) { /* use defaults */ }
     }
 
     function applyConfigDefaults(cfg) {
-        // Detect tab
-        const detectSens = document.querySelector(`input[name="sensitivity"][value="${cfg.sensitivity || "medium"}"]`);
-        if (detectSens) detectSens.checked = true;
+        const sensEl = document.querySelector(`input[name="sensitivity"][value="${cfg.sensitivity || "medium"}"]`);
+        if (sensEl) sensEl.checked = true;
         $("#detect-workers").value = cfg.workers || 4;
 
-        // Extract tab
-        const extFmt = document.querySelector(`input[name="extract-format"][value="${cfg.output_format || "jpg"}"]`);
-        if (extFmt) extFmt.checked = true;
+        const fmtEl = document.querySelector(`input[name="extract-format"][value="${cfg.output_format || "jpg"}"]`);
+        if (fmtEl) fmtEl.checked = true;
         $("#extract-quality").value = cfg.quality || 95;
         $("#extract-quality-value").textContent = cfg.quality || 95;
         $("#extract-workers").value = cfg.workers || 4;
 
-        // Visibility
-        const isPng = (cfg.output_format || "jpg") === "png";
-        if (isPng) hide($("#extract-quality-field"));
+        if ((cfg.output_format || "jpg") === "png") hide($("#extract-quality-field"));
         else show($("#extract-quality-field"));
     }
 
@@ -629,7 +654,6 @@
             output_format: document.querySelector('input[name="cfg-format"]:checked').value,
             quality:       parseInt($("#cfg-quality").value) || 95,
         };
-
         try {
             await api("/api/config", {
                 method: "POST",
@@ -643,13 +667,6 @@
             toast("Failed to save: " + e.message, true);
         }
     });
-
-    // ─── HTML Escape ───
-    function escapeHtml(str) {
-        const div = document.createElement("div");
-        div.textContent = str;
-        return div.innerHTML;
-    }
 
     // ─── Init ───
     loadSettings();
