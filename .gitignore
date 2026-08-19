@@ -83,3 +83,4 @@ env.bak/
 
 # Windows
 Thumbs.db
+.env

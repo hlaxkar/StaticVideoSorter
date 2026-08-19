@@ -72,6 +72,7 @@ python detect.py /path/to/folder [options]
 
 | Flag | Default | Description |
 |---|---|---|
+| `-r`, `--recursive` | off | Recursively search subdirectories for videos |
 | `--move` | off | Move classified videos into `static/` `dynamic/` `review/` subfolders |
 | `--sensitivity low\|medium\|high` | `medium` | Detection aggressiveness |
 | `--workers N` | auto | Parallel processing threads |
