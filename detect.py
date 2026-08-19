@@ -8,6 +8,7 @@ Usage:
     python detect.py /path/to/folder [options]
 
 Options:
+    -r, --recursive         Recursively search subdirectories for videos
     --move                  Move videos into static/ dynamic/ review/ subfolders
     --sensitivity LEVEL     low | medium | high  (default: medium)
     --workers N             Parallel workers (default: auto)
@@ -228,6 +229,8 @@ def parse_args():
     )
     p.add_argument("folder",
                    help="Folder containing videos to analyse")
+    p.add_argument("-r", "--recursive", action="store_true",
+                   help="Recursively search subdirectories for videos")
     p.add_argument("--move",         action="store_true",
                    help="Move classified videos into subfolders")
     p.add_argument("--sensitivity",  choices=["low", "medium", "high"],
@@ -312,10 +315,17 @@ def main():
         is_termux   = ENV["is_termux"],
     )
 
+    if args.recursive:
+        raw_paths = folder.rglob("*")
+    else:
+        raw_paths = folder.iterdir()
+
     all_videos = sorted([
-        p for p in folder.iterdir()
+        p for p in raw_paths
         if p.is_file()
         and p.suffix.lower() in VIDEO_EXTENSIONS
+        and not any(part.startswith(".") for part in p.relative_to(folder).parts)
+        and p.relative_to(folder).parts[0] not in ("static", "dynamic", "review")
     ])
 
     if not all_videos:
@@ -325,7 +335,7 @@ def main():
 
     to_detect = [
         vp for vp in all_videos
-        if not ckpt.is_done(vp.name) or ckpt.is_error(vp.name)
+        if not ckpt.is_done(str(vp.relative_to(folder))) or ckpt.is_error(str(vp.relative_to(folder)))
     ]
     already_done = len(all_videos) - len(to_detect)
 
@@ -333,6 +343,7 @@ def main():
     if already_done:
         print(f"   ✅ Already classified : {already_done}  (use --fresh to redo)")
     print(f"   🔍 To detect          : {len(to_detect)}")
+    print(f"   Recursive scan        : {'yes' if args.recursive else 'no (use -r)'}")
     print(f"   Sensitivity           : {args.sensitivity}")
     print(f"   Workers               : {workers}")
     print(f"   Move after detection  : {'yes' if args.move else 'no (use --move)'}")
@@ -354,17 +365,18 @@ def main():
                         break
 
                     vp = futures[future]
+                    rel_path = str(vp.relative_to(folder))
                     try:
                         row = future.result()
                     except Exception as e:
                         row = {f: "" for f in LOG_FIELDS}
-                        row["filename"] = vp.name
                         row["decision"] = f"error: {e}"
 
-                    ckpt.record(vp.name, row)
+                    row["filename"] = rel_path
+                    ckpt.record(rel_path, row)
                     pbar.update(1)
                     pbar.set_postfix({
-                        "file":     vp.name[:22],
+                        "file":     rel_path[:22],
                         "result":   row.get("decision", "?"),
                     })
 
