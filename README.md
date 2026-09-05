@@ -3,8 +3,6 @@
 Detect static-image videos (music visualizers, lyric videos, Instagram reposts) in a folder,
 sort them into categorized subfolders, and extract the single best frame from each.
 
-Works on **Linux** and **Android Termux** (auto-detected at runtime).
-
 ---
 
 ## Tools
@@ -24,11 +22,7 @@ you can use either one on its own.
 ### System
 
 ```bash
-# Linux
 sudo apt install ffmpeg
-
-# Termux (Android)
-pkg install ffmpeg
 ```
 
 ### Python
@@ -206,22 +200,6 @@ python extract.py ~/Videos/review --output-dir ~/Videos/review_frames
 
 # Re-extract only new additions
 python extract.py ~/Videos/static --skip-existing
-```
-
----
-
-## Termux (Android) Support
-
-Both scripts auto-detect Termux and adjust:
-- **Workers** capped at 2 to avoid memory issues
-- **Frame extraction** limited to 12 frames (vs 20 on Linux) to reduce RAM usage
-- **Timeouts** extended for slower storage (SD card / FUSE)
-
-Install dependencies in Termux:
-
-```bash
-pkg install ffmpeg python
-pip install opencv-python-headless numpy tqdm
 ```
 
 ---

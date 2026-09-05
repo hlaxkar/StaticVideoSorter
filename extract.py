@@ -2,8 +2,6 @@
 """
 extract.py — Extract the best frame from every video in a folder.
 
-Works on Linux and Android Termux. Termux mode is auto-detected.
-
 Usage:
     python extract.py /path/to/folder [options]
 
@@ -174,14 +172,9 @@ def check_dependencies():
     print("❌ Missing dependencies:")
     for m in missing:
         print(f"   • {m}")
-    if ENV["is_termux"]:
-        print("\nInstall in Termux:")
-        print("   pkg install ffmpeg")
-        print("   pip install opencv-python-headless numpy tqdm")
-    else:
-        print("\nInstall on Linux:")
-        print("   sudo apt install ffmpeg")
-        print("   pip install opencv-python-headless numpy tqdm")
+    print("\nInstall dependencies:")
+    print("   sudo apt install ffmpeg")
+    print("   pip install opencv-python-headless numpy tqdm")
     sys.exit(1)
 
 
@@ -199,9 +192,6 @@ def main():
     if not folder.is_dir():
         print(f"❌ Not a directory: {folder}")
         sys.exit(1)
-
-    if ENV["is_termux"]:
-        print("📱 Termux mode — workers capped at 2")
 
     output_dir = (
         Path(args.output_dir).resolve() if args.output_dir

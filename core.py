@@ -1,9 +1,8 @@
 """
 core.py — Shared detection and extraction logic for StaticVideoSorter.
 
-Both the CLI scripts (detect.py, extract.py) and the web GUI (app.py)
-import from this module.  No CLI-specific code lives here — only the
-pure algorithmic / IO functions.
+The CLI scripts (detect.py, extract.py) import from this module.
+No CLI-specific code lives here — only the pure algorithmic / IO functions.
 """
 
 import json
@@ -24,20 +23,14 @@ import numpy as np
 # ─────────────────────────────────────────────
 
 def detect_environment() -> dict:
-    """Detect runtime environment and return adjusted defaults."""
-    is_termux = (
-        os.environ.get("TERMUX_VERSION") is not None
-        or Path("/data/data/com.termux").exists()
-        or "com.termux" in os.environ.get("PREFIX", "")
-    )
+    """Detect runtime environment and return default parameters."""
     cpu_count = os.cpu_count() or 2
     return {
-        "is_termux":      is_termux,
-        "max_workers":    2 if is_termux else min(cpu_count, 8),
-        "ffmpeg_timeout": 90 if is_termux else 60,
-        "probe_timeout":  20 if is_termux else 10,
+        "max_workers":            min(cpu_count, 8),
+        "ffmpeg_timeout":         60,
+        "probe_timeout":          10,
         # extract.py uses longer ffmpeg timeouts for full-res extraction
-        "ffmpeg_timeout_extract": 120 if is_termux else 90,
+        "ffmpeg_timeout_extract": 90,
     }
 
 ENV = detect_environment()
@@ -491,7 +484,7 @@ def extract_full_res_frames(path: Path, duration: float) -> list[np.ndarray]:
     if duration <= 0:
         duration = 60.0
 
-    max_frames = 12 if ENV["is_termux"] else 20
+    max_frames = 20
     n       = min(max_frames, max(8, int(duration * 1.5)))
     margin  = max(0.5, duration * 0.05)
     t_start = margin

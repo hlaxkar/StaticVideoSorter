@@ -2,8 +2,6 @@
 """
 detect.py — Classify videos as static, dynamic, or review.
 
-Works on Linux and Android Termux. Termux mode is auto-detected.
-
 Usage:
     python detect.py /path/to/folder [options]
 
@@ -263,14 +261,9 @@ def check_dependencies():
     for m in missing:
         print(f"   • {m}")
 
-    if ENV["is_termux"]:
-        print("\nInstall in Termux:")
-        print("   pkg install ffmpeg")
-        print("   pip install opencv-python-headless numpy tqdm")
-    else:
-        print("\nInstall on Linux:")
-        print("   sudo apt install ffmpeg")
-        print("   pip install opencv-python-headless numpy tqdm")
+    print("\nInstall dependencies:")
+    print("   sudo apt install ffmpeg")
+    print("   pip install opencv-python-headless numpy tqdm")
     sys.exit(1)
 
 
@@ -287,9 +280,6 @@ def main():
     if not folder.is_dir():
         print(f"❌ Not a directory: {folder}")
         sys.exit(1)
-
-    if ENV["is_termux"]:
-        print("📱 Termux mode — workers capped at 2, no hardware acceleration")
 
     thresholds = SENSITIVITY_PRESETS[args.sensitivity]
     requested  = args.workers or ENV["max_workers"]
@@ -312,7 +302,6 @@ def main():
     ckpt.save_meta(
         sensitivity = args.sensitivity,
         started_at  = datetime.now().isoformat(),
-        is_termux   = ENV["is_termux"],
     )
 
     if args.recursive:
