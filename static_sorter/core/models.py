@@ -24,7 +24,7 @@ class VideoItem:
 
 @dataclass
 class VideoMetadata:
-    """Technical metadata probed from a video container/stream."""
+    """Technical and container metadata probed from a video container/stream."""
     duration_s: float = 0.0
     width: int = 0
     height: int = 0
@@ -32,6 +32,15 @@ class VideoMetadata:
     has_audio: bool = False
     codec: str = "unknown"
     filesize_bytes: int = 0
+    creation_time: Optional[str] = None
+    make: Optional[str] = None
+    model: Optional[str] = None
+    location: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    altitude: Optional[float] = None
+    tags: Dict[str, str] = field(default_factory=dict)
+
 
 
 @dataclass

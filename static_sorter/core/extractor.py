@@ -14,6 +14,7 @@ from static_sorter.core.config import (
 )
 from static_sorter.core.models import VideoItem, ExtractionResult
 from static_sorter.core.media import probe_video, extract_full_resolution_frames
+from static_sorter.core.exif import save_image_with_metadata
 
 
 def pick_best_frame(frames: List[np.ndarray]) -> int:
@@ -63,7 +64,8 @@ def extract_best_frame(
     timeout: int = DEFAULT_EXTRACT_TIMEOUT,
 ) -> ExtractionResult:
     """
-    Extract best frame from video_item and save it to output_path.
+    Extract best frame from video_item and save it to output_path,
+    retaining all video metadata, EXIF tags, GPS location, and timestamps.
     """
     if not video_item.path.exists() or not video_item.path.is_file():
         return ExtractionResult(
@@ -90,25 +92,20 @@ def extract_best_frame(
     frame = frames[best_idx]
 
     try:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        if fmt.lower() in ("jpg", "jpeg"):
-            ok = cv2.imwrite(
-                str(output_path),
-                frame,
-                [cv2.IMWRITE_JPEG_QUALITY, int(quality)],
-            )
-        else:
-            ok = cv2.imwrite(
-                str(output_path),
-                frame,
-                [cv2.IMWRITE_PNG_COMPRESSION, 0],
-            )
+        ok = save_image_with_metadata(
+            frame_bgr=frame,
+            output_path=output_path,
+            source_video_path=video_item.path,
+            meta=meta,
+            fmt=fmt,
+            quality=quality,
+        )
 
         if not ok:
             return ExtractionResult(
                 video=video_item,
                 status="error",
-                error="cv2.imwrite returned False",
+                error="Failed to save image with metadata",
                 total_frames_evaluated=len(frames),
             )
 
@@ -126,3 +123,4 @@ def extract_best_frame(
             error=str(e),
             total_frames_evaluated=len(frames),
         )
+

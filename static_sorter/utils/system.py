@@ -45,6 +45,13 @@ def check_system_dependencies() -> Tuple[bool, Dict[str, bool], List[str]]:
         missing.append("numpy (python module)")
 
     try:
+        import PIL  # noqa: F401
+        details["pillow"] = True
+    except ImportError:
+        details["pillow"] = False
+        missing.append("pillow (python module)")
+
+    try:
         import tqdm  # noqa: F401
         details["tqdm"] = True
     except ImportError:

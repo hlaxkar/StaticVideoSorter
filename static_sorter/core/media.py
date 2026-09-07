@@ -17,13 +17,15 @@ from static_sorter.core.config import (
     DEFAULT_EXTRACT_TIMEOUT,
     ANALYSIS_WIDTH,
 )
+from static_sorter.core.exif import parse_iso6709_location
 from static_sorter.core.models import VideoMetadata
 
 
 def probe_video(video_path: Path, timeout: int = DEFAULT_PROBE_TIMEOUT) -> VideoMetadata:
     """
     Probe video metadata using ffprobe.
-    Returns populated VideoMetadata object.
+    Returns populated VideoMetadata object including format/stream tags,
+    creation time, camera make/model, and GPS location.
     """
     meta = VideoMetadata()
     if not video_path.exists() or not video_path.is_file():
@@ -37,7 +39,8 @@ def probe_video(video_path: Path, timeout: int = DEFAULT_PROBE_TIMEOUT) -> Video
     cmd = [
         "ffprobe",
         "-v", "error",
-        "-show_entries", "format=duration,size:stream=width,height,codec_name,codec_type",
+        "-show_format",
+        "-show_streams",
         "-of", "json",
         str(video_path),
     ]
@@ -53,20 +56,32 @@ def probe_video(video_path: Path, timeout: int = DEFAULT_PROBE_TIMEOUT) -> Video
         if proc.returncode != 0:
             return meta
 
-        data = json.loads(proc.stdout)
-        
-        # Duration & size from format
+        data = json.loads(proc.stdout or "{}")
+
+        # Collect tags from format
         fmt = data.get("format", {})
+        fmt_tags = fmt.get("tags", {})
+        all_tags: dict = {}
+        if isinstance(fmt_tags, dict):
+            all_tags.update(fmt_tags)
+
+        # Duration & size from format
         if "duration" in fmt:
             try:
                 meta.duration_s = float(fmt["duration"])
-            except ValueError:
+            except (ValueError, TypeError):
                 pass
 
         # Stream properties
         streams = data.get("streams", [])
         for s in streams:
             stype = s.get("codec_type")
+            s_tags = s.get("tags", {})
+            if isinstance(s_tags, dict):
+                for k, v in s_tags.items():
+                    if k not in all_tags:
+                        all_tags[k] = v
+
             if stype == "video" and meta.width == 0:
                 meta.width = int(s.get("width", 0))
                 meta.height = int(s.get("height", 0))
@@ -85,6 +100,42 @@ def probe_video(video_path: Path, timeout: int = DEFAULT_PROBE_TIMEOUT) -> Video
                         meta.aspect_ratio = f"{meta.width}:{meta.height}"
             elif stype == "audio":
                 meta.has_audio = True
+
+        meta.tags = all_tags
+
+        # Extract creation time
+        meta.creation_time = (
+            all_tags.get("creation_time")
+            or all_tags.get("com.apple.quicktime.creationdate")
+            or all_tags.get("date")
+        )
+
+        # Extract make & model
+        meta.make = (
+            all_tags.get("make")
+            or all_tags.get("com.apple.quicktime.make")
+            or all_tags.get("camera_make")
+            or all_tags.get("android.manufacturer")
+        )
+        meta.model = (
+            all_tags.get("model")
+            or all_tags.get("com.apple.quicktime.model")
+            or all_tags.get("camera_model")
+            or all_tags.get("android.model")
+        )
+
+        # Extract & parse location
+        loc_str = (
+            all_tags.get("location")
+            or all_tags.get("location-eng")
+            or all_tags.get("com.apple.quicktime.location.ISO6709")
+        )
+        meta.location = loc_str
+        if loc_str:
+            lat, lon, alt = parse_iso6709_location(loc_str)
+            meta.latitude = lat
+            meta.longitude = lon
+            meta.altitude = alt
 
     except Exception:
         pass
