@@ -183,6 +183,7 @@ class PipelineOrchestrator:
         workers: int = DEFAULT_MAX_WORKERS,
         skip_existing: bool = False,
         fresh: bool = False,
+        tags: Optional[List[str]] = None,
         on_progress: Optional[Callable[[ExtractionResult, int, int], None]] = None,
     ) -> Dict[str, Any]:
         """
@@ -230,6 +231,7 @@ class PipelineOrchestrator:
                 output_path=dest_img,
                 fmt=fmt,
                 quality=quality,
+                tags=tags,
             )
 
         processed_count = 0
@@ -282,6 +284,7 @@ class PipelineOrchestrator:
         fmt: str = DEFAULT_IMAGE_FORMAT,
         quality: int = DEFAULT_IMAGE_QUALITY,
         fresh: bool = False,
+        tags: Optional[List[str]] = None,
         on_detection_progress: Optional[Callable[[DetectionResult, int, int], None]] = None,
         on_extraction_progress: Optional[Callable[[ExtractionResult, int, int], None]] = None,
     ) -> Dict[str, Any]:
@@ -361,6 +364,7 @@ class PipelineOrchestrator:
                 output_path=dest_img,
                 fmt=fmt,
                 quality=quality,
+                tags=tags,
             )
 
         processed_count = 0

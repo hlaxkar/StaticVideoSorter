@@ -94,6 +94,10 @@ def execute(args: Any) -> int:
                 pbar_ext = SimpleProgressBar(total=total, desc="Step 2/2: Extracting Frames")
             pbar_ext.update(1)
 
+    tags_list = None
+    if getattr(args, "tags", None):
+        tags_list = [t.strip() for t in str(args.tags).split(",") if t.strip()]
+
     orchestrator = PipelineOrchestrator(interrupt_handler=interrupt_handler)
     pipeline_res = orchestrator.run_unified_pipeline(
         folder=folder,
@@ -105,6 +109,7 @@ def execute(args: Any) -> int:
         fmt=getattr(args, "format", DEFAULT_IMAGE_FORMAT),
         quality=int(getattr(args, "quality", DEFAULT_IMAGE_QUALITY)),
         fresh=getattr(args, "fresh", False),
+        tags=tags_list,
         on_detection_progress=on_det_progress,
         on_extraction_progress=on_ext_progress,
     )

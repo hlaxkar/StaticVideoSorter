@@ -62,6 +62,8 @@ DEFAULT_PROBE_TIMEOUT = 10
 DEFAULT_EXTRACT_TIMEOUT = 90
 DEFAULT_IMAGE_FORMAT = "jpg"
 DEFAULT_IMAGE_QUALITY = 95
+DEFAULT_IMAGE_TAGS = ["static-video", "extracted-frame"]
+
 
 
 def load_config_file(config_path: Optional[Path] = None) -> Dict[str, Any]:

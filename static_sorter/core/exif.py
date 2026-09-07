@@ -17,6 +17,7 @@ from PIL import Image
 from PIL.ExifTags import Base, IFD, GPS
 from PIL.PngImagePlugin import PngInfo
 
+from static_sorter.core.config import DEFAULT_IMAGE_TAGS
 from static_sorter.core.models import VideoMetadata
 
 
@@ -111,10 +112,15 @@ def deg_to_dms(deg_float: float) -> Tuple[float, float, float]:
     return (float(d), float(m), round(s, 4))
 
 
-def build_image_exif(meta: VideoMetadata, video_path: Optional[Path] = None) -> Image.Exif:
+def build_image_exif(
+    meta: VideoMetadata,
+    video_path: Optional[Path] = None,
+    tags: Optional[List[str]] = None,
+) -> Image.Exif:
     """
     Constructs a Pillow Exif object populated with camera make/model,
-    creation datetime, GPS coordinates, orientation, software, and description.
+    creation datetime, GPS coordinates, orientation, software, description,
+    and keyword tags (XPKeywords, UserComment).
     """
     exif = Image.Exif()
 
@@ -122,32 +128,32 @@ def build_image_exif(meta: VideoMetadata, video_path: Optional[Path] = None) -> 
     exif[Base.Orientation] = 1
 
     # Camera Make & Model
-    tags = meta.tags or {}
+    meta_tags = meta.tags or {}
     make = (
         meta.make
-        or tags.get("make")
-        or tags.get("com.apple.quicktime.make")
-        or tags.get("camera_make")
-        or tags.get("android.manufacturer")
+        or meta_tags.get("make")
+        or meta_tags.get("com.apple.quicktime.make")
+        or meta_tags.get("camera_make")
+        or meta_tags.get("android.manufacturer")
     )
     if make:
         exif[Base.Make] = str(make).strip()
 
     model = (
         meta.model
-        or tags.get("model")
-        or tags.get("com.apple.quicktime.model")
-        or tags.get("camera_model")
-        or tags.get("android.model")
+        or meta_tags.get("model")
+        or meta_tags.get("com.apple.quicktime.model")
+        or meta_tags.get("camera_model")
+        or meta_tags.get("android.model")
     )
     if model:
         exif[Base.Model] = str(model).strip()
 
     # Software / Encoder
     software = (
-        tags.get("software")
-        or tags.get("encoder")
-        or tags.get("com.apple.quicktime.software")
+        meta_tags.get("software")
+        or meta_tags.get("encoder")
+        or meta_tags.get("com.apple.quicktime.software")
         or "StaticVideoSorter"
     )
     if software:
@@ -155,38 +161,56 @@ def build_image_exif(meta: VideoMetadata, video_path: Optional[Path] = None) -> 
 
     # Description & Copyright
     description = (
-        tags.get("description")
-        or tags.get("title")
-        or tags.get("comment")
-        or tags.get("synopsis")
+        meta_tags.get("description")
+        or meta_tags.get("title")
+        or meta_tags.get("comment")
+        or meta_tags.get("synopsis")
     )
     if description:
         exif[Base.ImageDescription] = str(description).strip()
 
-    copyright_info = tags.get("copyright") or tags.get("artist") or tags.get("author")
+    copyright_info = meta_tags.get("copyright") or meta_tags.get("artist") or meta_tags.get("author")
     if copyright_info:
         exif[Base.Copyright] = str(copyright_info).strip()
+
+    # Keyword tags: XPKeywords (0x9C9E), XPSubject (0x9C9B), XPComment (0x9C9C)
+    keyword_list: List[str] = list(tags if tags is not None else DEFAULT_IMAGE_TAGS)
+    if "keywords" in meta_tags:
+        for kw in str(meta_tags["keywords"]).split(","):
+            cleaned_kw = kw.strip()
+            if cleaned_kw and cleaned_kw not in keyword_list:
+                keyword_list.append(cleaned_kw)
+
+    if keyword_list:
+        kw_str = "; ".join(keyword_list)
+        exif[0x9C9E] = kw_str.encode("utf-16le") + b"\x00\x00"
+        exif[0x9C9B] = kw_str.encode("utf-16le") + b"\x00\x00"
+
+    if description:
+        exif[0x9C9C] = str(description).encode("utf-16le") + b"\x00\x00"
 
     # Creation Time
     creation_raw = (
         meta.creation_time
-        or tags.get("creation_time")
-        or tags.get("com.apple.quicktime.creationdate")
-        or tags.get("date")
+        or meta_tags.get("creation_time")
+        or meta_tags.get("com.apple.quicktime.creationdate")
+        or meta_tags.get("date")
     )
     exif_dt, tz_offset, dt_obj = parse_iso_datetime(creation_raw)
 
+    exif_ifd = exif.get_ifd(IFD.Exif)
     if exif_dt:
         exif[Base.DateTime] = exif_dt
-        exif_ifd = exif.get_ifd(IFD.Exif)
         exif_ifd[Base.DateTimeOriginal] = exif_dt
         exif_ifd[Base.DateTimeDigitized] = exif_dt
         if tz_offset:
             exif_ifd[Base.OffsetTime] = tz_offset
             exif_ifd[Base.OffsetTimeOriginal] = tz_offset
             exif_ifd[Base.OffsetTimeDigitized] = tz_offset
-        if description:
-            exif_ifd[Base.UserComment] = str(description).encode("utf-8")
+
+    # UserComment in Exif IFD
+    user_comment_text = description or (", ".join(keyword_list) if keyword_list else "StaticVideoSorter")
+    exif_ifd[Base.UserComment] = b"UNICODE\x00" + str(user_comment_text).encode("utf-8")
 
     # GPS Info
     lat = meta.latitude
@@ -194,7 +218,7 @@ def build_image_exif(meta: VideoMetadata, video_path: Optional[Path] = None) -> 
     alt = meta.altitude
 
     if lat is None or lon is None:
-        loc_str = meta.location or tags.get("location") or tags.get("location-eng") or tags.get("com.apple.quicktime.location.ISO6709")
+        loc_str = meta.location or meta_tags.get("location") or meta_tags.get("location-eng") or meta_tags.get("com.apple.quicktime.location.ISO6709")
         if loc_str:
             p_lat, p_lon, p_alt = parse_iso6709_location(loc_str)
             if p_lat is not None and p_lon is not None:
@@ -224,35 +248,44 @@ def build_image_exif(meta: VideoMetadata, video_path: Optional[Path] = None) -> 
     return exif
 
 
-def build_png_info(meta: VideoMetadata, video_path: Optional[Path] = None) -> PngInfo:
-    """Constructs PNG textual metadata chunks."""
+def build_png_info(
+    meta: VideoMetadata,
+    video_path: Optional[Path] = None,
+    tags: Optional[List[str]] = None,
+) -> PngInfo:
+    """Constructs PNG textual metadata chunks including keyword tags."""
     png_info = PngInfo()
-    tags = meta.tags or {}
+    meta_tags = meta.tags or {}
 
     creation_raw = (
         meta.creation_time
-        or tags.get("creation_time")
-        or tags.get("com.apple.quicktime.creationdate")
-        or tags.get("date")
+        or meta_tags.get("creation_time")
+        or meta_tags.get("com.apple.quicktime.creationdate")
+        or meta_tags.get("date")
     )
     if creation_raw:
         png_info.add_text("Creation Time", str(creation_raw))
 
-    make = meta.make or tags.get("make") or tags.get("com.apple.quicktime.make")
+    make = meta.make or meta_tags.get("make") or meta_tags.get("com.apple.quicktime.make")
     if make:
         png_info.add_text("Make", str(make))
 
-    model = meta.model or tags.get("model") or tags.get("com.apple.quicktime.model")
+    model = meta.model or meta_tags.get("model") or meta_tags.get("com.apple.quicktime.model")
     if model:
         png_info.add_text("Model", str(model))
 
-    software = tags.get("software") or tags.get("encoder") or "StaticVideoSorter"
+    software = meta_tags.get("software") or meta_tags.get("encoder") or "StaticVideoSorter"
     if software:
         png_info.add_text("Software", str(software))
 
-    desc = tags.get("description") or tags.get("title") or tags.get("comment")
+    desc = meta_tags.get("description") or meta_tags.get("title") or meta_tags.get("comment")
     if desc:
         png_info.add_text("Description", str(desc))
+
+    keyword_list: List[str] = list(tags if tags is not None else DEFAULT_IMAGE_TAGS)
+    if keyword_list:
+        png_info.add_text("Keywords", ", ".join(keyword_list))
+        png_info.add_text("Comment", ", ".join(keyword_list))
 
     return png_info
 
@@ -287,10 +320,11 @@ def save_image_with_metadata(
     meta: VideoMetadata,
     fmt: str = "jpg",
     quality: int = 95,
+    tags: Optional[List[str]] = None,
 ) -> bool:
     """
     Saves extracted OpenCV frame (BGR numpy array) to output_path with:
-    1. EXIF metadata (Make, Model, DateTimeOriginal, GPSInfo, Orientation, Software)
+    1. EXIF metadata (Make, Model, DateTimeOriginal, GPSInfo, Orientation, Software, XPKeywords)
     2. PNG textual metadata chunks if output format is PNG
     3. Filesystem timestamps (os.utime) synced to source video
     4. Optional exiftool supplementary copy if installed
@@ -304,7 +338,7 @@ def save_image_with_metadata(
         frame_rgb = frame_bgr
 
     pil_img = Image.fromarray(frame_rgb)
-    exif = build_image_exif(meta, source_video_path)
+    exif = build_image_exif(meta, source_video_path, tags=tags)
 
     fmt_lower = fmt.lower()
     if fmt_lower in ("jpg", "jpeg"):
@@ -316,7 +350,7 @@ def save_image_with_metadata(
             subsampling=0,
         )
     elif fmt_lower == "png":
-        png_info = build_png_info(meta, source_video_path)
+        png_info = build_png_info(meta, source_video_path, tags=tags)
         pil_img.save(
             str(output_path),
             format="PNG",

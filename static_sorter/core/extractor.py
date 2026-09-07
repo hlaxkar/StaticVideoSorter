@@ -62,10 +62,11 @@ def extract_best_frame(
     fmt: str = DEFAULT_IMAGE_FORMAT,
     quality: int = DEFAULT_IMAGE_QUALITY,
     timeout: int = DEFAULT_EXTRACT_TIMEOUT,
+    tags: Optional[List[str]] = None,
 ) -> ExtractionResult:
     """
     Extract best frame from video_item and save it to output_path,
-    retaining all video metadata, EXIF tags, GPS location, and timestamps.
+    retaining all video metadata, EXIF tags, GPS location, keywords, and timestamps.
     """
     if not video_item.path.exists() or not video_item.path.is_file():
         return ExtractionResult(
@@ -99,6 +100,7 @@ def extract_best_frame(
             meta=meta,
             fmt=fmt,
             quality=quality,
+            tags=tags,
         )
 
         if not ok:

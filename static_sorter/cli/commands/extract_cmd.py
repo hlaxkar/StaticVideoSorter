@@ -76,6 +76,10 @@ def execute(args: Any) -> int:
                 pbar = SimpleProgressBar(total=total, desc="Extracting frames")
             pbar.update(1)
 
+    tags_list = None
+    if getattr(args, "tags", None):
+        tags_list = [t.strip() for t in str(args.tags).split(",") if t.strip()]
+
     orchestrator = PipelineOrchestrator(interrupt_handler=interrupt_handler)
     summary = orchestrator.run_extraction(
         folder=folder,
@@ -86,6 +90,7 @@ def execute(args: Any) -> int:
         workers=args.workers or DEFAULT_MAX_WORKERS,
         skip_existing=getattr(args, "skip_existing", False),
         fresh=getattr(args, "fresh", False),
+        tags=tags_list,
         on_progress=on_progress,
     )
 

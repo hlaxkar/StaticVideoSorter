@@ -13,6 +13,8 @@
 - **One-Shot End-to-End Pipeline**: Discover $\rightarrow$ Detect $\rightarrow$ Move $\rightarrow$ Extract best frames with one command.
 - **Directory Structure Preservation**: When running with `-r/--recursive`, the original relative directory hierarchy is preserved across all categorized target folders (`static/`, `dynamic/`, `review/`, `extracted_frames/`).
 - **Optimal Best Frame Selection**: Composite scoring combining Laplacian sharpness variance and neighborhood motion calmness (excluding fade-in/fade-out artifacts).
+- **Metadata & EXIF Preservation**: Extracted stills retain original video timestamps (`DateTimeOriginal`), GPS location coordinates (map view), camera Make/Model, and container tags.
+- **Embedded Tags & Keywords**: Automatically embeds keywords (`static-video`, `extracted-frame` or custom `--tags`) into EXIF `XPKeywords`, `UserComment`, and PNG text chunks for instant recognition in photo managers like Immich, Google Photos, and Apple Photos.
 - **Fault-Tolerant & Resume-Safe**: Atomic background JSON/CSV checkpoints; clean SIGINT/SIGTERM handling.
 
 ---
@@ -51,7 +53,7 @@ pip install -e .
 Run the end-to-end pipeline on any video collection:
 
 ```bash
-# Classify, sort into subfolders, and extract still images for all static videos
+# Classify, sort into subfolders, and extract still images with EXIF & tags
 python -m static_sorter pipeline /path/to/videos -r
 ```
 
@@ -73,6 +75,7 @@ static-sorter pipeline /path/to/videos [options]
 | `--workers N` | auto | Parallel processing threads |
 | `--format {jpg,png}` | `jpg` | Image output format |
 | `--quality 1-100` | `95` | JPG output quality |
+| `--tags TAGS` | `static-video,extracted-frame` | Comma-separated keywords/tags to embed into EXIF |
 | `--fresh` | off | Ignore checkpoint and re-process everything |
 | `--json` | off | Output structured JSON results to stdout |
 | `-q, --quiet` | off | Suppress interactive progress output |
@@ -111,6 +114,7 @@ static-sorter extract /path/to/videos [options]
 | `--output-dir PATH` | `<folder>/extracted_frames/` | Output directory |
 | `--format {jpg,png}` | `jpg` | Image format |
 | `--quality 1-100` | `95` | JPG compression quality |
+| `--tags TAGS` | `static-video,extracted-frame` | Comma-separated keywords/tags to embed into EXIF |
 | `--skip-existing` | off | Skip videos whose image already exists |
 | `--fresh` | off | Re-extract all frames |
 

@@ -153,6 +153,13 @@ class TestMetadataPreservation(unittest.TestCase):
                 self.assertEqual(exif_jpg.get(Base.Model), "iPhone 14 Pro")
                 self.assertEqual(exif_jpg.get(Base.DateTime), "2023:08:14 10:15:30")
 
+                # Verify default XPKeywords tags (0x9C9E)
+                raw_keywords = exif_jpg.get(0x9C9E)
+                self.assertIsNotNone(raw_keywords)
+                decoded_keywords = raw_keywords.decode("utf-16le").rstrip("\x00")
+                self.assertIn("static-video", decoded_keywords)
+                self.assertIn("extracted-frame", decoded_keywords)
+
                 exif_ifd = exif_jpg.get_ifd(IFD.Exif)
                 self.assertEqual(exif_ifd.get(Base.DateTimeOriginal), "2023:08:14 10:15:30")
 
@@ -168,8 +175,9 @@ class TestMetadataPreservation(unittest.TestCase):
                 expected_dt.strftime("%Y-%m-%d %H:%M:%S"),
             )
 
-            # Test 2: Extract as PNG
-            res_png = extract_best_frame(v_item, out_png, fmt="png")
+            # Test 2: Extract as PNG with custom tags
+            custom_tags = ["favorite", "vacation-2023", "best-frame"]
+            res_png = extract_best_frame(v_item, out_png, fmt="png", tags=custom_tags)
             self.assertEqual(res_png.status, "ok", f"PNG extraction failed: {res_png.error}")
             self.assertTrue(out_png.exists())
 
@@ -178,6 +186,18 @@ class TestMetadataPreservation(unittest.TestCase):
                 self.assertEqual(exif_png.get(Base.Make), "Apple")
                 self.assertEqual(exif_png.get(Base.Model), "iPhone 14 Pro")
 
+                # Verify custom tags in EXIF
+                raw_kw = exif_png.get(0x9C9E)
+                self.assertIsNotNone(raw_kw)
+                decoded_kw = raw_kw.decode("utf-16le").rstrip("\x00")
+                self.assertIn("favorite", decoded_kw)
+                self.assertIn("vacation-2023", decoded_kw)
+
+                # Verify custom tags in PNG text info
+                self.assertIn("Keywords", img_png.info)
+                self.assertIn("favorite", img_png.info["Keywords"])
+
 
 if __name__ == "__main__":
     unittest.main()
+
