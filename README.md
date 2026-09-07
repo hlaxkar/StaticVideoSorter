@@ -1,206 +1,173 @@
-# StaticVideoSorter
+# StaticVideoSorter (`static-sorter`)
 
-Detect static-image videos (music visualizers, lyric videos, Instagram reposts) in a folder,
-sort them into categorized subfolders, and extract the single best frame from each.
-
----
-
-## Tools
-
-| Script | Purpose |
-|---|---|
-| `detect.py` | Classify videos as **static** / **dynamic** / **review** |
-| `extract.py` | Extract the best frame from every video in a folder |
-
-These two scripts are designed to work together but are fully independent —
-you can use either one on its own.
+**StaticVideoSorter** automatically detects static-image videos (music visualizers, lyric videos, podcast clips, Instagram reposts) in your media libraries, categorizes them, and extracts the single best, sharpest frame as a lightweight still image.
 
 ---
 
-## Dependencies
+## Key Features
 
-### System
+- **3-Layer Intelligent Classification**:
+  - *Layer 1*: Global inter-frame motion variance.
+  - *Layer 2*: 6×6 spatial grid analysis (ignores localized lyric tickers, animated stickers, watermarks).
+  - *Layer 3*: Metadata heuristics (aspect ratio, audio presence, duration scaling).
+- **One-Shot End-to-End Pipeline**: Discover $\rightarrow$ Detect $\rightarrow$ Move $\rightarrow$ Extract best frames with one command.
+- **Directory Structure Preservation**: When running with `-r/--recursive`, the original relative directory hierarchy is preserved across all categorized target folders (`static/`, `dynamic/`, `review/`, `extracted_frames/`).
+- **Optimal Best Frame Selection**: Composite scoring combining Laplacian sharpness variance and neighborhood motion calmness (excluding fade-in/fade-out artifacts).
+- **Fault-Tolerant & Resume-Safe**: Atomic background JSON/CSV checkpoints; clean SIGINT/SIGTERM handling.
+
+---
+
+## Installation
+
+### 1. System Dependencies
 
 ```bash
-sudo apt install ffmpeg
+# Ubuntu / Debian
+sudo apt update && sudo apt install ffmpeg
+
+# Arch Linux
+sudo pacman -S ffmpeg
+
+# macOS (Homebrew)
+brew install ffmpeg
 ```
 
-### Python
+### 2. Python Package
 
+Install dependencies directly:
 ```bash
 pip install -r requirements.txt
 ```
 
-Or install manually:
-
+Or install `static-sorter` as a local CLI package:
 ```bash
-pip install opencv-python-headless numpy tqdm
-```
-
-> `tqdm` is optional — a built-in fallback progress bar is used if it's not installed.
-
----
-
-## Quick Start
-
-```bash
-# Step 1 — Classify videos (dry run, nothing is moved)
-python detect.py /path/to/videos
-
-# Step 2 — Inspect the detection_log.csv, then move when happy
-python detect.py /path/to/videos --move
-
-# Step 3 — Extract frames from the static folder
-python extract.py /path/to/videos/static
+pip install -e .
 ```
 
 ---
 
-## detect.py — Video Classification
+## Quick Start: One-Shot Pipeline
+
+Run the end-to-end pipeline on any video collection:
 
 ```bash
-python detect.py /path/to/folder [options]
+# Classify, sort into subfolders, and extract still images for all static videos
+python -m static_sorter pipeline /path/to/videos -r
 ```
 
-### Options
+---
 
-| Flag | Default | Description |
+## Subcommands Reference
+
+### 1. `pipeline` — Unified End-to-End Processing
+
+```bash
+static-sorter pipeline /path/to/videos [options]
+```
+
+| Option | Default | Description |
 |---|---|---|
-| `-r`, `--recursive` | off | Recursively search subdirectories for videos |
-| `--move` | off | Move classified videos into `static/` `dynamic/` `review/` subfolders |
-| `--sensitivity low\|medium\|high` | `medium` | Detection aggressiveness |
+| `-r, --recursive` | off | Recursively scan subdirectories |
+| `--no-move` | off | Perform frame extraction without moving videos |
+| `--sensitivity {low,medium,high}` | `medium` | Classification aggressiveness |
 | `--workers N` | auto | Parallel processing threads |
-| `--fresh` | off | Ignore checkpoint, re-detect everything |
-| `--report` | off | Print detailed per-video breakdown table after run |
-| `--debug` | off | Print ffmpeg stderr for failed frame extractions |
-
-### Output Structure
-
-```
-your_folder/
-├── static/               ← confirmed static videos (moved with --move)
-├── dynamic/              ← confirmed dynamic videos
-├── review/               ← borderline videos for manual check
-├── detection_log.csv     ← full audit trail with scores
-└── checkpoint.json       ← progress checkpoint (resume-safe)
-```
-
-### Checkpoint & Resume
-
-- Progress is saved to `checkpoint.json` after each video.
-- If interrupted (Ctrl+C), re-run the same command to **resume** where you left off.
-- Use `--fresh` to ignore the checkpoint and start from scratch.
-- A second Ctrl+C force quits immediately.
+| `--format {jpg,png}` | `jpg` | Image output format |
+| `--quality 1-100` | `95` | JPG output quality |
+| `--fresh` | off | Ignore checkpoint and re-process everything |
+| `--json` | off | Output structured JSON results to stdout |
+| `-q, --quiet` | off | Suppress interactive progress output |
 
 ---
 
-## extract.py — Best Frame Extraction
+### 2. `detect` — Classify Videos
+
+Classifies videos into `static/`, `dynamic/`, and `review/` categories and generates `detection_log.csv`.
 
 ```bash
-python extract.py /path/to/folder [options]
+static-sorter detect /path/to/videos [options]
 ```
 
-### Options
-
-| Flag | Default | Description |
+| Option | Default | Description |
 |---|---|---|
-| `--output-dir PATH` | `<folder>/extracted_frames/` | Where to save extracted frames |
-| `--format png\|jpg` | `jpg` | Output image format |
-| `--quality 1-100` | `95` | JPG quality (ignored for PNG) |
-| `--workers N` | auto | Parallel processing threads |
-| `--skip-existing` | off | Skip videos whose frame already exists |
-| `--fresh` | off | Re-extract everything, ignoring skip list |
-
-### Output
-
-Frames are saved as `<video_stem>.jpg` (or `.png`) in the output directory.
+| `-r, --recursive` | off | Recursively search subdirectories |
+| `--move` | off | Move classified videos into subfolders (preserving directory tree) |
+| `--sensitivity {low,medium,high}` | `medium` | Detection sensitivity |
+| `--report` | off | Print detailed per-video scoring breakdown table |
+| `--fresh` | off | Clear checkpoint and re-analyze all files |
 
 ---
 
-## How Detection Works
+### 3. `extract` — Best Frame Extraction
 
-### Layer 1 — Global Motion Score
-
-Samples frames evenly across the video (2–16 depending on duration) and computes
-the mean pixel difference between consecutive frames. A low score means very
-little changes frame-to-frame → likely a static image.
-
-### Layer 2 — Spatial Zone Analysis
-
-Divides each frame into a **6×6 grid** and checks which zones have motion above
-a threshold. If only a small fraction of zones are active (e.g. a corner watermark
-or a scrolling text strip), the background is still considered static.
-This catches Instagram stories with GIF stickers and lyric overlays.
-
-### Layer 3 — Heuristics
-
-Boosts confidence based on metadata signals:
-- **Portrait/square aspect ratio** — Instagram story/post
-- **Audio stream present** — music video
-- **Short duration** — videos under 5s and 10s receive reduced confidence to avoid false positives;
-  videos under 10 minutes get a moderate boost
-- **Common repost codec** — H.264 / HEVC
-
-### Final Decision
-
-All three layer scores are combined into a single confidence value (0–1) using
-weighted averaging (50% motion, 30% zones, 20% heuristics):
-
-| Confidence | Decision |
-|---|---|
-| `≥ threshold_static` | **static** — move + extract frame |
-| `≥ threshold_review` | **review** — move to review folder |
-| Below both | **dynamic** — leave untouched |
-
----
-
-## Best Frame Selection
-
-When extracting frames, the script picks the frame that scores best on:
-
-- **Low local motion** — avoids frames mid-animation or with a sticker overlay
-- **High sharpness** — Laplacian variance; avoids blurry or faded frames
-- First and last frames are **excluded** to dodge fade-in / fade-out
-
-Full-resolution frames are extracted using PNG internally (no compression artifacts),
-then saved in the requested output format.
-
----
-
-## Sensitivity Guide
-
-| Level | Use when |
-|---|---|
-| `low` | Conservative — only catch very obvious static videos |
-| `medium` | Good default — catches most music/lyric/story videos |
-| `high` | Aggressive — catches more borderline cases (more review videos) |
-
----
-
-## Example Runs
+Extracts the single highest quality frame from videos in a folder:
 
 ```bash
-# Preview decisions without moving anything
-python detect.py ~/Videos
-
-# Detailed per-video report
-python detect.py ~/Videos --report
-
-# Move classified videos into subfolders
-python detect.py ~/Videos --move
-
-# Aggressive detection with 8 workers
-python detect.py ~/Videos --sensitivity high --workers 8 --move
-
-# Extract frames from static videos as PNG
-python extract.py ~/Videos/static --format png
-
-# Extract from review folder into a custom output directory
-python extract.py ~/Videos/review --output-dir ~/Videos/review_frames
-
-# Re-extract only new additions
-python extract.py ~/Videos/static --skip-existing
+static-sorter extract /path/to/videos [options]
 ```
+
+| Option | Default | Description |
+|---|---|---|
+| `-r, --recursive` | off | Recursively scan subdirectories |
+| `--output-dir PATH` | `<folder>/extracted_frames/` | Output directory |
+| `--format {jpg,png}` | `jpg` | Image format |
+| `--quality 1-100` | `95` | JPG compression quality |
+| `--skip-existing` | off | Skip videos whose image already exists |
+| `--fresh` | off | Re-extract all frames |
+
+---
+
+### 4. `report` — Audit Log Inspection
+
+View statistics and summaries from previous runs:
+
+```bash
+static-sorter report /path/to/videos
+```
+
+---
+
+### 5. `check` — Diagnostics
+
+Verify system binary and python module availability:
+
+```bash
+static-sorter check
+```
+
+---
+
+## Recursive Directory Preservation Example
+
+Given an input folder structure:
+```
+my_videos/
+├── family/
+│   └── 2024/
+│       └── vacation_clip.mp4   (dynamic motion)
+└── podcasts/
+    └── episode12_visualizer.mp4 (static image + audio)
+```
+
+Running `static-sorter pipeline my_videos -r`:
+```
+my_videos/
+├── dynamic/
+│   └── family/
+│       └── 2024/
+│           └── vacation_clip.mp4
+├── static/
+│   └── podcasts/
+│       ├── episode12_visualizer.mp4
+│       └── episode12_visualizer.jpg   ← Extracted best still frame
+├── detection_log.csv
+└── checkpoint.json
+```
+
+---
+
+## Legacy Scripts
+
+`detect.py` and `extract.py` are preserved in the root directory for backward compatibility and seamlessly delegate to `static-sorter detect` and `static-sorter extract`.
 
 ---
 

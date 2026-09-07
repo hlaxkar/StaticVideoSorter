@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "static-sorter"
+version = "1.0.0"
+description = "Industrial-grade tool to detect static videos, organize media, and extract best frames"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "opencv-python-headless>=4.5",
+    "numpy>=1.21",
+    "tqdm>=4.60",
+]
+
+[project.scripts]
+static-sorter = "static_sorter.cli.parser:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["static_sorter*"]
