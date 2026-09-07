@@ -159,20 +159,6 @@ def build_image_exif(
     if software:
         exif[Base.Software] = str(software).strip()
 
-    # Description & Copyright
-    description = (
-        meta_tags.get("description")
-        or meta_tags.get("title")
-        or meta_tags.get("comment")
-        or meta_tags.get("synopsis")
-    )
-    if description:
-        exif[Base.ImageDescription] = str(description).strip()
-
-    copyright_info = meta_tags.get("copyright") or meta_tags.get("artist") or meta_tags.get("author")
-    if copyright_info:
-        exif[Base.Copyright] = str(copyright_info).strip()
-
     # Keyword tags: XPKeywords (0x9C9E), XPSubject (0x9C9B), XPComment (0x9C9C)
     keyword_list: List[str] = list(tags if tags is not None else DEFAULT_IMAGE_TAGS)
     if "keywords" in meta_tags:
@@ -181,6 +167,24 @@ def build_image_exif(
             if cleaned_kw and cleaned_kw not in keyword_list:
                 keyword_list.append(cleaned_kw)
 
+    # Description & Copyright
+    description = (
+        meta_tags.get("description")
+        or meta_tags.get("title")
+        or meta_tags.get("comment")
+        or meta_tags.get("synopsis")
+    )
+    
+    # Populate ImageDescription (displayed directly in Immich / photo manager Description box)
+    if description:
+        exif[Base.ImageDescription] = str(description).strip()
+    elif keyword_list:
+        exif[Base.ImageDescription] = ", ".join(keyword_list)
+
+    copyright_info = meta_tags.get("copyright") or meta_tags.get("artist") or meta_tags.get("author")
+    if copyright_info:
+        exif[Base.Copyright] = str(copyright_info).strip()
+
     if keyword_list:
         kw_str = "; ".join(keyword_list)
         exif[0x9C9E] = kw_str.encode("utf-16le") + b"\x00\x00"
@@ -188,6 +192,8 @@ def build_image_exif(
 
     if description:
         exif[0x9C9C] = str(description).encode("utf-16le") + b"\x00\x00"
+    elif keyword_list:
+        exif[0x9C9C] = (", ".join(keyword_list)).encode("utf-16le") + b"\x00\x00"
 
     # Creation Time
     creation_raw = (
@@ -313,6 +319,58 @@ def run_exiftool_copy(source_video: Path, dest_image: Path) -> bool:
         return False
 
 
+def build_xmp_packet(meta: VideoMetadata, tags: Optional[List[str]] = None) -> bytes:
+    """Constructs an Adobe XMP packet with Dublin Core subject and description for Immich / Lightroom."""
+    keyword_list: List[str] = list(tags if tags is not None else DEFAULT_IMAGE_TAGS)
+    meta_tags = meta.tags or {}
+    if "keywords" in meta_tags:
+        for kw in str(meta_tags["keywords"]).split(","):
+            cleaned_kw = kw.strip()
+            if cleaned_kw and cleaned_kw not in keyword_list:
+                keyword_list.append(cleaned_kw)
+
+    desc_text = (
+        meta_tags.get("description")
+        or meta_tags.get("title")
+        or (", ".join(keyword_list) if keyword_list else "")
+    )
+
+    def _escape(s: str) -> str:
+        return (
+            s.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&apos;")
+        )
+
+    bag_items = "".join(f"<rdf:li>{_escape(t)}</rdf:li>" for t in keyword_list)
+    xmp_str = f"""<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:dc="http://purl.org/dc/elements/1.1/"
+    xmlns:lr="http://lightroom.adobe.com/xap/1.0/">
+   <dc:description>
+    <rdf:Alt>
+     <rdf:li xml:lang="x-default">{_escape(str(desc_text))}</rdf:li>
+    </rdf:Alt>
+   </dc:description>
+   <dc:subject>
+    <rdf:Bag>
+     {bag_items}
+    </rdf:Bag>
+   </dc:subject>
+   <lr:hierarchicalSubject>
+    <rdf:Bag>
+     {bag_items}
+    </rdf:Bag>
+   </lr:hierarchicalSubject>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>"""
+    return xmp_str.encode("utf-8")
+
+
 def save_image_with_metadata(
     frame_bgr: np.ndarray,
     output_path: Path,
@@ -324,10 +382,11 @@ def save_image_with_metadata(
 ) -> bool:
     """
     Saves extracted OpenCV frame (BGR numpy array) to output_path with:
-    1. EXIF metadata (Make, Model, DateTimeOriginal, GPSInfo, Orientation, Software, XPKeywords)
-    2. PNG textual metadata chunks if output format is PNG
-    3. Filesystem timestamps (os.utime) synced to source video
-    4. Optional exiftool supplementary copy if installed
+    1. EXIF metadata (Make, Model, DateTimeOriginal, GPSInfo, Orientation, Software, XPKeywords, ImageDescription)
+    2. Adobe XMP packet (dc:subject, dc:description, lr:hierarchicalSubject) for Immich / Lightroom
+    3. PNG textual metadata chunks if output format is PNG
+    4. Filesystem timestamps (os.utime) synced to source video
+    5. Optional exiftool supplementary copy if installed
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -339,6 +398,7 @@ def save_image_with_metadata(
 
     pil_img = Image.fromarray(frame_rgb)
     exif = build_image_exif(meta, source_video_path, tags=tags)
+    xmp_bytes = build_xmp_packet(meta, tags=tags)
 
     fmt_lower = fmt.lower()
     if fmt_lower in ("jpg", "jpeg"):
@@ -347,6 +407,7 @@ def save_image_with_metadata(
             format="JPEG",
             quality=int(quality),
             exif=exif,
+            xmp=xmp_bytes,
             subsampling=0,
         )
     elif fmt_lower == "png":
